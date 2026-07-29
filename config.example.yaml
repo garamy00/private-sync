@@ -1,0 +1,21 @@
+# 노트북: agent.yaml 로 복사해서 쓴다
+remote:
+  host: dgson@ai
+  store: ~/private-sync/store
+
+sources:
+  - label: SKT 문서
+    paths:
+      - ~/Documents/skt/          # 디렉토리 전체
+      - ~/work/견적서_v3.xlsx      # 파일 하나만
+    exclude: ["*.tmp"]            # 내장 기본 제외 목록에 추가된다
+
+  - label: 개인 메모
+    paths:
+      - ~/notes/
+
+# DGX 서버: bot.yaml 로 복사해서 쓴다
+# store: ~/private-sync/store
+#
+# 서버에서 필요한 환경변수:
+#   PRIVATE_SYNC_BOT_TOKEN, PRIVATE_SYNC_CHAT_ID, PRIVATE_SYNC_ZIP_PASSWORD
