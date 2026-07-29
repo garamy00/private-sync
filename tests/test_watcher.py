@@ -63,6 +63,22 @@ def test_excluded_file_does_not_match(tmp_path):
     assert match_target(junk, targets) is None
 
 
+def test_specific_file_target_survives_broader_exclude(tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
+    quote = work / "견적서.xlsx"
+    quote.write_text("q", encoding="utf-8")
+    targets = build_targets(
+        (
+            Source(label="프로젝트", paths=(work,), exclude=("*.xlsx",)),
+            Source(label="견적서", paths=(quote,), exclude=()),
+        )
+    )
+
+    # 앞선 대상의 exclude가 뒤에 개별 등록된 파일을 가려서는 안 된다
+    assert match_target(quote, targets).label == "견적서"
+
+
 def test_is_excluded_matches_glob_on_any_part():
     assert is_excluded(("work", "~$보고서.docx"), ("~$*",)) is True
     assert is_excluded(("work", "보고서.docx"), ("~$*",)) is False

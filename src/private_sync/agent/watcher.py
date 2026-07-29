@@ -70,13 +70,19 @@ def _relative_parts(event_path: Path, target: WatchTarget) -> tuple[str, ...] | 
 
 
 def match_target(event_path: Path, targets: list[WatchTarget]) -> WatchTarget | None:
-    """이벤트 경로가 속한 감시 대상을 찾는다. exclude에 걸리면 None."""
+    """이벤트 경로가 속한 감시 대상을 찾는다. 어디에도 속하지 않으면 None.
+
+    한 경로가 여러 대상에 걸칠 수 있으므로 exclude에 걸린 대상은 건너뛰고 다음
+    대상을 계속 확인한다. 폴더 전체를 제외 패턴과 함께 등록하고 그 안의 파일
+    하나를 따로 등록한 설정에서, 개별 등록이 앞선 대상의 exclude에 묻히지
+    않게 한다.
+    """
     for target in targets:
         parts = _relative_parts(event_path, target)
         if parts is None:
             continue
         if is_excluded(parts, target.exclude):
-            return None
+            continue
         return target
     return None
 
