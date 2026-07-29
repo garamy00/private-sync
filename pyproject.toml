@@ -27,11 +27,5 @@ where = ["src"]
 [tool.ruff]
 line-length = 88
 
-[tool.ruff.lint]
-# 이 환경의 ruff 0.16.0은 설정이 없으면 문서화된 기본값(E4, E7, E9, F)보다
-# 훨씬 넓은 규칙 집합(UP, ASYNC, YTT 등 포함 416개)을 암묵적으로 활성화한다.
-# 브리프가 가정한 표준 기본값으로 고정해 % 포매팅 등 팀 스타일과 충돌을 막는다.
-select = ["E4", "E7", "E9", "F"]
-
 [tool.pytest.ini_options]
 pythonpath = ["src"]

@@ -70,12 +70,12 @@ def _read_yaml(path: Path) -> dict:
         with path.open(encoding="utf-8") as fp:
             data = yaml.safe_load(fp)
     except OSError as exc:
-        raise ConfigError("cannot read config %s: %s" % (path, exc.strerror)) from exc
+        raise ConfigError(f"cannot read config {path}: {exc.strerror}") from exc
     except yaml.YAMLError as exc:
-        raise ConfigError("invalid YAML in %s" % path) from exc
+        raise ConfigError(f"invalid YAML in {path}") from exc
 
     if not isinstance(data, dict):
-        raise ConfigError("config %s must be a mapping" % path)
+        raise ConfigError(f"config {path} must be a mapping")
     return data
 
 
@@ -85,7 +85,7 @@ def _validate_label(label: str) -> None:
         raise ConfigError("source label must not be empty")
     for bad in _FORBIDDEN_IN_LABEL:
         if bad in label:
-            raise ConfigError("source label %r must not contain %r" % (label, bad))
+            raise ConfigError(f"source label {label!r} must not contain {bad!r}")
 
 
 def _build_source(raw: dict) -> Source:
@@ -95,22 +95,20 @@ def _build_source(raw: dict) -> Source:
 
     raw_paths = raw.get("paths") or []
     if not isinstance(raw_paths, list) or not raw_paths:
-        raise ConfigError("source %r must define a non-empty paths list" % label)
+        raise ConfigError(f"source {label!r} must define a non-empty paths list")
 
     paths: list[Path] = []
     for item in raw_paths:
         path = Path(str(item)).expanduser()
         if not path.exists():
-            raise ConfigError("source %r path does not exist: %s" % (label, path))
+            raise ConfigError(f"source {label!r} path does not exist: {path}")
         paths.append(path)
 
     # 저장 이름이 겹치면 서버에서 서로 덮어쓰므로 시작 시점에 잡는다
     names = [p.name for p in paths]
     duplicates = sorted({n for n in names if names.count(n) > 1})
     if duplicates:
-        raise ConfigError(
-            "source %r has conflicting store names: %s" % (label, duplicates)
-        )
+        raise ConfigError(f"source {label!r} has conflicting store names: {duplicates}")
 
     exclude = tuple(str(x) for x in (raw.get("exclude") or []))
     return Source(label=label, paths=tuple(paths), exclude=DEFAULT_EXCLUDES + exclude)
@@ -138,7 +136,7 @@ def load_agent_config(path: Path) -> AgentConfig:
 
     labels = [s.label for s in sources]
     if len(set(labels)) != len(labels):
-        raise ConfigError("duplicate source labels: %s" % sorted(labels))
+        raise ConfigError(f"duplicate source labels: {sorted(labels)}")
 
     return AgentConfig(
         remote=RemoteConfig(host=host, store=normalize_remote_store(store)),
@@ -160,7 +158,7 @@ def load_bot_config(path: Path, env: Mapping[str, str] | None = None) -> BotConf
         raise ConfigError("store is required")
     store = Path(raw_store).expanduser()
     if not store.is_dir():
-        raise ConfigError("store directory does not exist: %s" % store)
+        raise ConfigError(f"store directory does not exist: {store}")
 
     secrets = {
         name: env.get(name, "")
@@ -172,7 +170,7 @@ def load_bot_config(path: Path, env: Mapping[str, str] | None = None) -> BotConf
     }
     missing = [name for name, value in secrets.items() if not value]
     if missing:
-        raise ConfigError("missing environment variables: %s" % ", ".join(missing))
+        raise ConfigError(f"missing environment variables: {', '.join(missing)}")
 
     return BotConfig(
         store=store,
