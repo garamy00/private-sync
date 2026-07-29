@@ -1084,6 +1084,22 @@ def test_excluded_file_does_not_match(tmp_path):
     assert match_target(junk, targets) is None
 
 
+def test_specific_file_target_survives_broader_exclude(tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
+    quote = work / "견적서.xlsx"
+    quote.write_text("q", encoding="utf-8")
+    targets = build_targets(
+        (
+            Source(label="프로젝트", paths=(work,), exclude=("*.xlsx",)),
+            Source(label="견적서", paths=(quote,), exclude=()),
+        )
+    )
+
+    # 앞선 대상의 exclude가 뒤에 개별 등록된 파일을 가려서는 안 된다
+    assert match_target(quote, targets).label == "견적서"
+
+
 def test_is_excluded_matches_glob_on_any_part():
     assert is_excluded(("work", "~$보고서.docx"), ("~$*",)) is True
     assert is_excluded(("work", "보고서.docx"), ("~$*",)) is False
@@ -1201,13 +1217,19 @@ def _relative_parts(event_path: Path, target: WatchTarget) -> tuple[str, ...] | 
 def match_target(
     event_path: Path, targets: list[WatchTarget]
 ) -> WatchTarget | None:
-    """이벤트 경로가 속한 감시 대상을 찾는다. exclude에 걸리면 None."""
+    """이벤트 경로가 속한 감시 대상을 찾는다. 어디에도 속하지 않으면 None.
+
+    한 경로가 여러 대상에 걸칠 수 있으므로 exclude에 걸린 대상은 건너뛰고 다음
+    대상을 계속 확인한다. 폴더 전체를 제외 패턴과 함께 등록하고 그 안의 파일
+    하나를 따로 등록한 설정에서, 개별 등록이 앞선 대상의 exclude에 묻히지
+    않게 한다.
+    """
     for target in targets:
         parts = _relative_parts(event_path, target)
         if parts is None:
             continue
         if is_excluded(parts, target.exclude):
-            return None
+            continue
         return target
     return None
 
@@ -1241,7 +1263,7 @@ class Debouncer:
 - [ ] **Step 4: 테스트 통과 확인**
 
 Run: `.venv/bin/pytest tests/test_watcher.py -v`
-Expected: PASS (9 passed)
+Expected: PASS (10 passed)
 
 - [ ] **Step 5: 린트와 커밋**
 
@@ -3138,7 +3160,7 @@ Run:
 ```bash
 .venv/bin/ruff format src tests && .venv/bin/ruff check src tests && .venv/bin/pytest -q
 ```
-Expected: 76 passed
+Expected: 77 passed
 
 ```bash
 git add src/private_sync/bot/main.py tests/test_bot_main.py
@@ -3316,7 +3338,7 @@ Run:
 ```bash
 .venv/bin/ruff format src tests && .venv/bin/ruff check src tests && .venv/bin/pytest -q
 ```
-Expected: 76 passed
+Expected: 77 passed
 
 ```bash
 git add README.md deploy
