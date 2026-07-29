@@ -18,7 +18,9 @@
 - `src/` 레이아웃. 패키지는 `src/private_sync/`, 테스트는 `tests/`.
 - ruff `line-length = 88`. 커밋 전 `ruff format` 과 `ruff check` 를 통과해야 한다.
 - 모든 public 함수에 타입 힌트와 Google Style docstring을 작성한다. 1줄 docstring은 명령형으로 쓰고 마침표로 끝낸다.
-- 로그는 `logging` 모듈만 사용한다. `print()` 금지. f-string 대신 `%` 포매팅을 쓴다: `logger.info("Uploaded %s", path)`.
+- 로그는 `logging` 모듈만 사용한다. `print()` 금지. 로그 호출은 lazy args를 쓴다: `logger.info("Uploaded %s", path)`. 이때 `%` 연산자를 직접 쓰지 않고 인수로 넘긴다.
+- **로그가 아닌 문자열(예외 메시지, 반환 문자열)은 f-string으로 만든다.** `"text %s" % value` 형태의 `%` 연산자는 쓰지 않는다 — ruff `UP031`에 걸린다. 아래 태스크의 코드 예시가 예외 메시지에 `%` 연산자를 쓰고 있으면 같은 문면을 유지한 f-string으로 바꿔 작성하라 (테스트가 매칭하는 메시지 텍스트는 그대로 유지해야 한다).
+- `pyproject.toml` 에 `[tool.ruff.lint]` `select` 를 추가하지 않는다. ruff 0.16의 기본 규칙 415개를 그대로 적용한다 (사용자 결정, 2026-07-30).
 - **로그 메시지는 영문**, **주석과 docstring은 한국어**로 작성한다.
 - 예외는 구체적 타입만 잡는다. bare `except:` 와 `except Exception:` 금지. 체이닝은 `raise NewError(...) from exc`.
 - 비밀값(`PRIVATE_SYNC_BOT_TOKEN`, `PRIVATE_SYNC_CHAT_ID`, `PRIVATE_SYNC_ZIP_PASSWORD`)은 환경변수로만 읽는다. YAML·코드·로그에 넣지 않는다.
