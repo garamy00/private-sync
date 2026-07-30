@@ -352,7 +352,7 @@ sources:
 
 
 def _runtime(tmp_path, label, watched):
-    """리로드를 시험할 최소 런타임을 만든다."""
+    """리로드를 시험할 최소 런타임과 루프 상태를 만든다."""
     config_path = tmp_path / "agent.yaml"
     config_path.write_text(_yaml(label, watched), encoding="utf-8")
     config = load_agent_config(config_path)
@@ -372,13 +372,13 @@ def _runtime(tmp_path, label, watched):
         targets=targets,
         watcher=ConfigWatcher(config_path),
     )
-    return runtime, pending
+    return runtime, pending, state
 
 
 def test_reload_applies_the_new_label(tmp_path):
     docs = tmp_path / "docs"
     docs.mkdir()
-    runtime, _pending = _runtime(tmp_path, "이전", docs)
+    runtime, _pending, _state = _runtime(tmp_path, "이전", docs)
 
     runtime.config_path.write_text(_yaml("이후", docs), encoding="utf-8")
 
@@ -391,7 +391,7 @@ def test_reload_queues_only_newly_added_targets(tmp_path):
     docs.mkdir()
     extra = tmp_path / "extra"
     extra.mkdir()
-    runtime, pending = _runtime(tmp_path, "문서", docs)
+    runtime, pending, _state = _runtime(tmp_path, "문서", docs)
     runtime.config_path.write_text(
         f"""
 remote:
@@ -415,7 +415,7 @@ sources:
 def test_invalid_config_keeps_previous_settings(tmp_path):
     docs = tmp_path / "docs"
     docs.mkdir()
-    runtime, _pending = _runtime(tmp_path, "이전", docs)
+    runtime, _pending, _state = _runtime(tmp_path, "이전", docs)
     before = runtime.targets
 
     runtime.config_path.write_text("sources: [", encoding="utf-8")
@@ -431,7 +431,7 @@ def test_removed_label_is_warned_about(tmp_path, caplog):
     docs.mkdir()
     other = tmp_path / "other"
     other.mkdir()
-    runtime, _pending = _runtime(tmp_path, "사라질라벨", docs)
+    runtime, _pending, _state = _runtime(tmp_path, "사라질라벨", docs)
     runtime.config_path.write_text(_yaml("남을라벨", other), encoding="utf-8")
 
     with caplog.at_level(logging.WARNING):
@@ -445,7 +445,7 @@ def test_reload_reregisters_observer_watches(tmp_path):
     docs.mkdir()
     other = tmp_path / "other"
     other.mkdir()
-    runtime, _pending = _runtime(tmp_path, "문서", docs)
+    runtime, _pending, _state = _runtime(tmp_path, "문서", docs)
     runtime.config_path.write_text(_yaml("문서", other), encoding="utf-8")
 
     _reload_config(runtime)
@@ -453,7 +453,33 @@ def test_reload_reregisters_observer_watches(tmp_path):
     # 기존 등록을 먼저 지우고 새 경로로 다시 등록해야 한다
     assert runtime.observer.calls[0] == "unschedule_all"
     assert ("schedule", str(other), True) in runtime.observer.calls
+
+
+def test_reregistration_failure_stops_the_daemon(tmp_path, caplog):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+    runtime, _pending, state = _runtime(tmp_path, "문서", docs)
+
+    class _ExplodingObserver(_FakeObserver):
+        def schedule(self, handler, path, recursive=False):
+            raise OSError(24, "Too many open files")
+
+    runtime.observer = _ExplodingObserver()
+    runtime.config_path.write_text(_yaml("문서", other), encoding="utf-8")
+    # mtime 이 그대로면 리로드가 돌지 않아 루프가 영원히 돈다
+    os.utime(runtime.config_path, (2_000_000_000, 2_000_000_000))
+
+    with caplog.at_level(logging.CRITICAL):
+        _run_loop(runtime, state)
+
+    # 감시가 하나도 없는 채로 계속 도는 것이 최악이다. 시끄럽게 멈춰야 한다.
+    assert state.stop.is_set()
+    assert "Cannot re-register watches" in caplog.text
 ```
+
+`import os` 를 테스트 파일 상단에 추가하고, 임포트에 `_run_loop` 을 더한다.
 
 - [ ] **Step 2: 테스트가 실패하는지 확인**
 
@@ -608,7 +634,7 @@ def _run_loop(runtime: AgentRuntime, state: LoopState) -> None:
 - [ ] **Step 4: 테스트 통과 확인**
 
 Run: `.venv/bin/pytest tests/test_agent_main.py -v`
-Expected: PASS (20 passed)
+Expected: PASS (21 passed)
 
 - [ ] **Step 5: 전체 테스트와 린트**
 
@@ -616,7 +642,7 @@ Run:
 ```bash
 .venv/bin/ruff format src tests && .venv/bin/ruff check src tests && .venv/bin/pytest -q
 ```
-Expected: 124 passed
+Expected: 125 passed
 
 - [ ] **Step 6: 실제 데몬으로 확인**
 
