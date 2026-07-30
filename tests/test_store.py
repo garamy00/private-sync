@@ -14,9 +14,9 @@ from private_sync.errors import StoreError
 @pytest.fixture
 def store(tmp_path):
     root = tmp_path / "store"
-    (root / "SKT 문서" / "sub").mkdir(parents=True)
-    (root / "SKT 문서" / "계약서.docx").write_text("c", encoding="utf-8")
-    (root / "SKT 문서" / "sub" / "회의록.md").write_text("m", encoding="utf-8")
+    (root / "업무 문서" / "sub").mkdir(parents=True)
+    (root / "업무 문서" / "계약서.docx").write_text("c", encoding="utf-8")
+    (root / "업무 문서" / "sub" / "회의록.md").write_text("m", encoding="utf-8")
     (root / "메모").mkdir()
     (root / "메모" / "계약_메모.txt").write_text("n", encoding="utf-8")
     return root
@@ -25,17 +25,17 @@ def store(tmp_path):
 def test_list_root_returns_labels(store):
     entries = list_dir(store, "")
 
-    assert [e.name for e in entries] == ["SKT 문서", "메모"]
+    assert [e.name for e in entries] == ["메모", "업무 문서"]
     assert all(e.is_dir for e in entries)
 
 
 def test_list_dir_sorts_directories_before_files(store):
-    entries = list_dir(store, "SKT 문서")
+    entries = list_dir(store, "업무 문서")
 
     assert [e.name for e in entries] == ["sub", "계약서.docx"]
     assert entries[0].is_dir is True
     assert entries[1].is_dir is False
-    assert entries[1].rel == "SKT 문서/계약서.docx"
+    assert entries[1].rel == "업무 문서/계약서.docx"
     assert entries[1].size == 1
 
 
@@ -43,8 +43,8 @@ def test_search_matches_filename_substring_across_labels(store):
     results = search(store, "계약")
 
     assert sorted(e.rel for e in results) == [
-        "SKT 문서/계약서.docx",
         "메모/계약_메모.txt",
+        "업무 문서/계약서.docx",
     ]
 
 
@@ -77,20 +77,20 @@ def test_resolve_safe_rejects_missing_target(store):
 
 
 def test_resolve_safe_accepts_valid_relative_path(store):
-    resolved = resolve_safe(store, "SKT 문서/계약서.docx")
+    resolved = resolve_safe(store, "업무 문서/계약서.docx")
 
-    assert resolved == (store / "SKT 문서" / "계약서.docx").resolve()
+    assert resolved == (store / "업무 문서" / "계약서.docx").resolve()
 
 
 def test_parent_rel_walks_up_to_root():
-    assert parent_rel("SKT 문서/sub") == "SKT 문서"
-    assert parent_rel("SKT 문서") == ""
+    assert parent_rel("업무 문서/sub") == "업무 문서"
+    assert parent_rel("업무 문서") == ""
     assert parent_rel("") is None
 
 
 def test_list_dir_rejects_non_directory(store):
     with pytest.raises(StoreError, match="not a directory"):
-        list_dir(store, "SKT 문서/계약서.docx")
+        list_dir(store, "업무 문서/계약서.docx")
 
 
 def test_symlink_escaping_store_is_hidden_and_unreadable(store, tmp_path):
@@ -106,7 +106,7 @@ def test_symlink_escaping_store_is_hidden_and_unreadable(store, tmp_path):
 
 
 def test_symlink_inside_store_stays_visible(store):
-    (store / "메모" / "바로가기.docx").symlink_to(store / "SKT 문서" / "계약서.docx")
+    (store / "메모" / "바로가기.docx").symlink_to(store / "업무 문서" / "계약서.docx")
 
     assert "바로가기.docx" in [e.name for e in list_dir(store, "메모")]
 

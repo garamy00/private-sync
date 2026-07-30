@@ -1,12 +1,12 @@
 # 노트북: agent.yaml 로 복사해서 쓴다
 remote:
-  host: dgson@ai
+  host: user@sync-server
   store: ~/private-sync/store
 
 sources:
-  - label: SKT 문서
+  - label: 업무 문서
     paths:
-      - ~/Documents/skt/          # 디렉토리 전체
+      - ~/Documents/work/          # 디렉토리 전체
       - ~/work/견적서_v3.xlsx      # 파일 하나만
     exclude: ["*.tmp"]            # 내장 기본 제외 목록에 추가된다
 

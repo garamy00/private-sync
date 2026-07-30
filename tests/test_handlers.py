@@ -10,17 +10,17 @@ from private_sync.bot.handlers import (
 from private_sync.bot.store import Entry
 
 ROOT = [
-    Entry(name="SKT 문서", rel="SKT 문서", is_dir=True, size=0),
+    Entry(name="업무 문서", rel="업무 문서", is_dir=True, size=0),
     Entry(name="메모", rel="메모", is_dir=True, size=0),
 ]
-SKT = [
-    Entry(name="sub", rel="SKT 문서/sub", is_dir=True, size=0),
-    Entry(name="계약서.docx", rel="SKT 문서/계약서.docx", is_dir=False, size=2048),
+WORK_DOCS = [
+    Entry(name="sub", rel="업무 문서/sub", is_dir=True, size=0),
+    Entry(name="계약서.docx", rel="업무 문서/계약서.docx", is_dir=False, size=2048),
 ]
 
 
 def _ctx(chat_id="123", listing=None, results=None):
-    tree = {"": ROOT, "SKT 문서": SKT} if listing is None else listing
+    tree = {"": ROOT, "업무 문서": WORK_DOCS} if listing is None else listing
     return Context(
         chat_id=chat_id,
         tokens=TokenMap(),
@@ -39,7 +39,7 @@ def test_start_lists_root_labels():
     action = handle(_message("/start"), _ctx())
 
     assert isinstance(action, SendText)
-    assert [label for label, _ in action.buttons] == ["📁 SKT 문서", "📁 메모"]
+    assert [label for label, _ in action.buttons] == ["📁 업무 문서", "📁 메모"]
 
 
 def test_unauthorized_chat_is_ignored():
@@ -67,13 +67,13 @@ def test_whitespace_only_message_returns_usage():
 def test_directory_button_lists_children_with_up_button():
     ctx = _ctx()
     start = handle(_message("/start"), ctx)
-    skt_token = {label: data for label, data in start.buttons}["📁 SKT 문서"]
+    work_token = {label: data for label, data in start.buttons}["📁 업무 문서"]
 
     action = handle(
         Incoming(
             kind="callback",
             chat_id="123",
-            text=skt_token,
+            text=work_token,
             message_id=5,
             callback_id="cb1",
         ),
@@ -90,7 +90,7 @@ def test_directory_button_lists_children_with_up_button():
 
 def test_file_button_requests_send():
     ctx = _ctx()
-    token = ctx.tokens.put("file", "SKT 문서/계약서.docx")
+    token = ctx.tokens.put("file", "업무 문서/계약서.docx")
 
     action = handle(
         Incoming(
@@ -99,7 +99,7 @@ def test_file_button_requests_send():
         ctx,
     )
 
-    assert action == SendFile(rel="SKT 문서/계약서.docx", caption="계약서.docx")
+    assert action == SendFile(rel="업무 문서/계약서.docx", caption="계약서.docx")
 
 
 def test_expired_token_is_reported():
@@ -120,7 +120,7 @@ def test_expired_token_is_reported():
 
 def test_find_lists_matches():
     results = [
-        Entry(name="계약서.docx", rel="SKT 문서/계약서.docx", is_dir=False, size=10)
+        Entry(name="계약서.docx", rel="업무 문서/계약서.docx", is_dir=False, size=10)
     ]
     action = handle(_message("/find 계약"), _ctx(results=results))
 

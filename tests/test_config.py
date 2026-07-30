@@ -25,10 +25,10 @@ def test_agent_config_loads_directory_and_file_paths(tmp_path):
         tmp_path / "agent.yaml",
         f"""
 remote:
-  host: dgson@ai
+  host: user@sync-server
   store: ~/private-sync/store
 sources:
-  - label: SKT 문서
+  - label: 업무 문서
     paths:
       - {docs}
       - {quote}
@@ -38,7 +38,7 @@ sources:
 
     conf = load_agent_config(cfg)
 
-    assert conf.remote.host == "dgson@ai"
+    assert conf.remote.host == "user@sync-server"
     assert conf.remote.store == "private-sync/store"
     assert len(conf.sources) == 1
     assert conf.sources[0].paths == (docs, quote)
@@ -51,7 +51,7 @@ def test_agent_config_rejects_missing_path(tmp_path):
         tmp_path / "agent.yaml",
         """
 remote:
-  host: dgson@ai
+  host: user@sync-server
   store: store
 sources:
   - label: 문서
@@ -74,7 +74,7 @@ def test_agent_config_rejects_duplicate_labels(tmp_path):
         tmp_path / "agent.yaml",
         f"""
 remote:
-  host: dgson@ai
+  host: user@sync-server
   store: store
 sources:
   - label: 문서
@@ -100,7 +100,7 @@ def test_agent_config_rejects_colliding_store_names(tmp_path):
         tmp_path / "agent.yaml",
         f"""
 remote:
-  host: dgson@ai
+  host: user@sync-server
   store: store
 sources:
   - label: 문서
@@ -122,7 +122,7 @@ def test_agent_config_rejects_label_with_path_separator(tmp_path):
         tmp_path / "agent.yaml",
         f"""
 remote:
-  host: dgson@ai
+  host: user@sync-server
   store: store
 sources:
   - label: a/b
@@ -144,7 +144,7 @@ def test_agent_config_rejects_scalar_exclude(tmp_path):
         tmp_path / "agent.yaml",
         f"""
 remote:
-  host: dgson@ai
+  host: user@sync-server
   store: store
 sources:
   - label: 문서
@@ -163,7 +163,7 @@ def test_agent_config_rejects_scalar_remote(tmp_path):
     cfg = _write(
         tmp_path / "agent.yaml",
         f"""
-remote: dgson@ai
+remote: user@sync-server
 sources:
   - label: 문서
     paths: [{docs}]
@@ -180,7 +180,7 @@ def test_agent_config_rejects_scalar_source_entry(tmp_path):
         tmp_path / "agent.yaml",
         """
 remote:
-  host: dgson@nonexistent.invalid
+  host: user@nonexistent.invalid
   store: store
 sources:
   - 문서

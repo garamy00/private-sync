@@ -21,7 +21,7 @@ from private_sync.agent.watcher import Debouncer, build_targets
 from private_sync.config import AgentConfig, RemoteConfig, Source, load_agent_config
 from private_sync.errors import RetryableUploadError, UploadError
 
-REMOTE = RemoteConfig(host="dgson@nonexistent.invalid", store="store")
+REMOTE = RemoteConfig(host="user@nonexistent.invalid", store="store")
 
 
 def _config(path: Path, label: str = "문서") -> AgentConfig:
@@ -312,7 +312,7 @@ class _FakeObserver:
         self.calls.append(("schedule", path, recursive))
 
 
-def _yaml(label, path, host="dgson@nonexistent.invalid"):
+def _yaml(label, path, host="user@nonexistent.invalid"):
     return f"""
 remote:
   host: {host}
@@ -389,7 +389,7 @@ def test_remote_change_requeues_every_target(tmp_path):
     docs.mkdir()
     runtime, pending, _state = _runtime(tmp_path, "문서", docs)
     runtime.config_path.write_text(
-        _yaml("문서", docs, host="dgson@other.invalid"), encoding="utf-8"
+        _yaml("문서", docs, host="user@other.invalid"), encoding="utf-8"
     )
 
     _reload_config(runtime)
@@ -422,7 +422,7 @@ def test_reload_queues_only_newly_added_targets(tmp_path):
     runtime.config_path.write_text(
         f"""
 remote:
-  host: dgson@nonexistent.invalid
+  host: user@nonexistent.invalid
   store: store
 sources:
   - label: 문서

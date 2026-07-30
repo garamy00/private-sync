@@ -164,10 +164,10 @@ def test_agent_config_loads_directory_and_file_paths(tmp_path):
         tmp_path / "agent.yaml",
         f"""
 remote:
-  host: dgson@ai
+  host: user@sync-server
   store: ~/private-sync/store
 sources:
-  - label: SKT 문서
+  - label: 업무 문서
     paths:
       - {docs}
       - {quote}
@@ -177,7 +177,7 @@ sources:
 
     conf = load_agent_config(cfg)
 
-    assert conf.remote.host == "dgson@ai"
+    assert conf.remote.host == "user@sync-server"
     assert conf.remote.store == "private-sync/store"
     assert len(conf.sources) == 1
     assert conf.sources[0].paths == (docs, quote)
@@ -190,7 +190,7 @@ def test_agent_config_rejects_missing_path(tmp_path):
         tmp_path / "agent.yaml",
         """
 remote:
-  host: dgson@ai
+  host: user@sync-server
   store: store
 sources:
   - label: 문서
@@ -213,7 +213,7 @@ def test_agent_config_rejects_duplicate_labels(tmp_path):
         tmp_path / "agent.yaml",
         f"""
 remote:
-  host: dgson@ai
+  host: user@sync-server
   store: store
 sources:
   - label: 문서
@@ -239,7 +239,7 @@ def test_agent_config_rejects_colliding_store_names(tmp_path):
         tmp_path / "agent.yaml",
         f"""
 remote:
-  host: dgson@ai
+  host: user@sync-server
   store: store
 sources:
   - label: 문서
@@ -261,7 +261,7 @@ def test_agent_config_rejects_label_with_path_separator(tmp_path):
         tmp_path / "agent.yaml",
         f"""
 remote:
-  host: dgson@ai
+  host: user@sync-server
   store: store
 sources:
   - label: a/b
@@ -509,13 +509,13 @@ Expected: PASS (8 passed)
 ```yaml
 # 노트북: agent.yaml 로 복사해서 쓴다
 remote:
-  host: dgson@ai
+  host: user@sync-server
   store: ~/private-sync/store
 
 sources:
-  - label: SKT 문서
+  - label: 업무 문서
     paths:
-      - ~/Documents/skt/          # 디렉토리 전체
+      - ~/Documents/work/          # 디렉토리 전체
       - ~/work/견적서_v3.xlsx      # 파일 하나만
     exclude: ["*.tmp"]            # 내장 기본 제외 목록에 추가된다
 
@@ -759,7 +759,7 @@ from private_sync.agent.uploader import (
 from private_sync.config import RemoteConfig
 from private_sync.errors import RetryableUploadError, UploadError
 
-REMOTE = RemoteConfig(host="dgson@ai", store="private-sync/store")
+REMOTE = RemoteConfig(host="user@sync-server", store="private-sync/store")
 
 
 def _ok(_args, _timeout):
@@ -777,7 +777,7 @@ def _failing(code, stderr=""):
 
 def test_rsync_args_keep_directory_name_and_apply_excludes():
     args = build_rsync_args(
-        REMOTE, "SKT 문서", Path("/Users/me/Documents/skt"), (".DS_Store", ".git/")
+        REMOTE, "업무 문서", Path("/Users/me/Documents/work"), (".DS_Store", ".git/")
     )
 
     assert args[0] == "rsync"
@@ -785,10 +785,10 @@ def test_rsync_args_keep_directory_name_and_apply_excludes():
     assert "-s" not in args
     assert "--exclude=.DS_Store" in args
     assert "--exclude=.git/" in args
-    # 트레일링 슬래시가 없어야 원격에 skt/ 디렉토리째로 생성된다
-    assert args[-2] == "/Users/me/Documents/skt"
+    # 트레일링 슬래시가 없어야 원격에 work/ 디렉토리째로 생성된다
+    assert args[-2] == "/Users/me/Documents/work"
     # 공백이 든 원격 경로는 원격 셸이 쪼개지 않도록 따옴표로 감싼다
-    assert args[-1] == "dgson@ai:'private-sync/store/SKT 문서/'"
+    assert args[-1] == "user@sync-server:'private-sync/store/업무 문서/'"
 
 
 def test_rsync_args_for_single_file():
@@ -796,21 +796,21 @@ def test_rsync_args_for_single_file():
 
     assert args[-2] == "/Users/me/work/견적서.xlsx"
     # 한글은 shlex 기준 안전 문자가 아니라 따옴표가 붙는다
-    assert args[-1] == "dgson@ai:'private-sync/store/메모/'"
+    assert args[-1] == "user@sync-server:'private-sync/store/메모/'"
 
 
 def test_rsync_args_leave_plain_ascii_path_unquoted():
     args = build_rsync_args(REMOTE, "docs", Path("/Users/me/docs"), ())
 
-    assert args[-1] == "dgson@ai:private-sync/store/docs/"
+    assert args[-1] == "user@sync-server:private-sync/store/docs/"
 
 
 def test_mkdir_args_quote_label_with_spaces():
-    args = build_mkdir_args(REMOTE, "SKT 문서")
+    args = build_mkdir_args(REMOTE, "업무 문서")
 
     assert args[0] == "ssh"
-    assert args[-2] == "dgson@ai"
-    assert args[-1] == "mkdir -p 'private-sync/store/SKT 문서'"
+    assert args[-2] == "user@sync-server"
+    assert args[-1] == "mkdir -p 'private-sync/store/업무 문서'"
 
 
 def test_upload_runs_mkdir_then_rsync():
@@ -1320,7 +1320,7 @@ from private_sync.agent.watcher import Debouncer, build_targets
 from private_sync.config import AgentConfig, RemoteConfig, Source
 from private_sync.errors import RetryableUploadError, UploadError
 
-REMOTE = RemoteConfig(host="dgson@ai", store="store")
+REMOTE = RemoteConfig(host="user@sync-server", store="store")
 
 
 def _config(path: Path) -> AgentConfig:
@@ -1768,9 +1768,9 @@ from private_sync.errors import StoreError
 @pytest.fixture
 def store(tmp_path):
     root = tmp_path / "store"
-    (root / "SKT 문서" / "sub").mkdir(parents=True)
-    (root / "SKT 문서" / "계약서.docx").write_text("c", encoding="utf-8")
-    (root / "SKT 문서" / "sub" / "회의록.md").write_text("m", encoding="utf-8")
+    (root / "업무 문서" / "sub").mkdir(parents=True)
+    (root / "업무 문서" / "계약서.docx").write_text("c", encoding="utf-8")
+    (root / "업무 문서" / "sub" / "회의록.md").write_text("m", encoding="utf-8")
     (root / "메모").mkdir()
     (root / "메모" / "계약_메모.txt").write_text("n", encoding="utf-8")
     return root
@@ -1779,17 +1779,17 @@ def store(tmp_path):
 def test_list_root_returns_labels(store):
     entries = list_dir(store, "")
 
-    assert [e.name for e in entries] == ["SKT 문서", "메모"]
+    assert [e.name for e in entries] == ["업무 문서", "메모"]
     assert all(e.is_dir for e in entries)
 
 
 def test_list_dir_sorts_directories_before_files(store):
-    entries = list_dir(store, "SKT 문서")
+    entries = list_dir(store, "업무 문서")
 
     assert [e.name for e in entries] == ["sub", "계약서.docx"]
     assert entries[0].is_dir is True
     assert entries[1].is_dir is False
-    assert entries[1].rel == "SKT 문서/계약서.docx"
+    assert entries[1].rel == "업무 문서/계약서.docx"
     assert entries[1].size == 1
 
 
@@ -1797,7 +1797,7 @@ def test_search_matches_filename_substring_across_labels(store):
     results = search(store, "계약")
 
     assert sorted(e.rel for e in results) == [
-        "SKT 문서/계약서.docx",
+        "업무 문서/계약서.docx",
         "메모/계약_메모.txt",
     ]
 
@@ -1831,20 +1831,20 @@ def test_resolve_safe_rejects_missing_target(store):
 
 
 def test_resolve_safe_accepts_valid_relative_path(store):
-    resolved = resolve_safe(store, "SKT 문서/계약서.docx")
+    resolved = resolve_safe(store, "업무 문서/계약서.docx")
 
-    assert resolved == (store / "SKT 문서" / "계약서.docx").resolve()
+    assert resolved == (store / "업무 문서" / "계약서.docx").resolve()
 
 
 def test_parent_rel_walks_up_to_root():
-    assert parent_rel("SKT 문서/sub") == "SKT 문서"
-    assert parent_rel("SKT 문서") == ""
+    assert parent_rel("업무 문서/sub") == "업무 문서"
+    assert parent_rel("업무 문서") == ""
     assert parent_rel("") is None
 
 
 def test_list_dir_rejects_non_directory(store):
     with pytest.raises(StoreError, match="not a directory"):
-        list_dir(store, "SKT 문서/계약서.docx")
+        list_dir(store, "업무 문서/계약서.docx")
 
 
 def test_symlink_escaping_store_is_hidden_and_unreadable(store, tmp_path):
@@ -1860,7 +1860,7 @@ def test_symlink_escaping_store_is_hidden_and_unreadable(store, tmp_path):
 
 
 def test_symlink_inside_store_stays_visible(store):
-    (store / "메모" / "바로가기.docx").symlink_to(store / "SKT 문서" / "계약서.docx")
+    (store / "메모" / "바로가기.docx").symlink_to(store / "업무 문서" / "계약서.docx")
 
     assert "바로가기.docx" in [e.name for e in list_dir(store, "메모")]
 
@@ -2330,17 +2330,17 @@ from private_sync.bot.handlers import (
 from private_sync.bot.store import Entry
 
 ROOT = [
-    Entry(name="SKT 문서", rel="SKT 문서", is_dir=True, size=0),
+    Entry(name="업무 문서", rel="업무 문서", is_dir=True, size=0),
     Entry(name="메모", rel="메모", is_dir=True, size=0),
 ]
-SKT = [
-    Entry(name="sub", rel="SKT 문서/sub", is_dir=True, size=0),
-    Entry(name="계약서.docx", rel="SKT 문서/계약서.docx", is_dir=False, size=2048),
+WORK_DOCS = [
+    Entry(name="sub", rel="업무 문서/sub", is_dir=True, size=0),
+    Entry(name="계약서.docx", rel="업무 문서/계약서.docx", is_dir=False, size=2048),
 ]
 
 
 def _ctx(chat_id="123", listing=None, results=None):
-    tree = {"": ROOT, "SKT 문서": SKT} if listing is None else listing
+    tree = {"": ROOT, "업무 문서": WORK_DOCS} if listing is None else listing
     return Context(
         chat_id=chat_id,
         tokens=TokenMap(),
@@ -2359,7 +2359,7 @@ def test_start_lists_root_labels():
     action = handle(_message("/start"), _ctx())
 
     assert isinstance(action, SendText)
-    assert [label for label, _ in action.buttons] == ["📁 SKT 문서", "📁 메모"]
+    assert [label for label, _ in action.buttons] == ["📁 업무 문서", "📁 메모"]
 
 
 def test_unauthorized_chat_is_ignored():
@@ -2387,13 +2387,13 @@ def test_whitespace_only_message_returns_usage():
 def test_directory_button_lists_children_with_up_button():
     ctx = _ctx()
     start = handle(_message("/start"), ctx)
-    skt_token = dict((label, data) for label, data in start.buttons)["📁 SKT 문서"]
+    work_token = dict((label, data) for label, data in start.buttons)["📁 업무 문서"]
 
     action = handle(
         Incoming(
             kind="callback",
             chat_id="123",
-            text=skt_token,
+            text=work_token,
             message_id=5,
             callback_id="cb1",
         ),
@@ -2410,7 +2410,7 @@ def test_directory_button_lists_children_with_up_button():
 
 def test_file_button_requests_send():
     ctx = _ctx()
-    token = ctx.tokens.put("file", "SKT 문서/계약서.docx")
+    token = ctx.tokens.put("file", "업무 문서/계약서.docx")
 
     action = handle(
         Incoming(
@@ -2419,7 +2419,7 @@ def test_file_button_requests_send():
         ctx,
     )
 
-    assert action == SendFile(rel="SKT 문서/계약서.docx", caption="계약서.docx")
+    assert action == SendFile(rel="업무 문서/계약서.docx", caption="계약서.docx")
 
 
 def test_expired_token_is_reported():
@@ -2439,7 +2439,7 @@ def test_expired_token_is_reported():
 
 
 def test_find_lists_matches():
-    results = [Entry(name="계약서.docx", rel="SKT 문서/계약서.docx", is_dir=False, size=10)]
+    results = [Entry(name="계약서.docx", rel="업무 문서/계약서.docx", is_dir=False, size=10)]
     action = handle(_message("/find 계약"), _ctx(results=results))
 
     assert [label for label, _ in action.buttons] == ["📄 계약서.docx (10 B)"]
@@ -3737,7 +3737,7 @@ launchctl load ~/Library/LaunchAgents/com.private-sync.agent.plist
 ## 서버 설정
 
 ```bash
-ssh dgson@ai
+ssh user@sync-server
 mkdir -p ~/private-sync/store ~/.config/private-sync
 # 저장소 코드를 서버에 배치하고 venv 를 만든다
 cp config.example.yaml ~/.config/private-sync/bot.yaml   # store 항목만 남긴다
@@ -3797,14 +3797,14 @@ git commit -m "docs: 배포 설정과 사용 문서 추가"
 mkdir -p /tmp/ps-test && echo hello > /tmp/ps-test/a.txt
 cat > /tmp/ps-agent.yaml <<'EOF'
 remote:
-  host: dgson@ai
+  host: user@sync-server
   store: ~/private-sync/store
 sources:
   - label: 테스트
     paths:
       - /tmp/ps-test
 EOF
-ssh dgson@ai 'mkdir -p ~/private-sync/store'
+ssh user@sync-server 'mkdir -p ~/private-sync/store'
 .venv/bin/private-sync-agent --config /tmp/ps-agent.yaml --debug
 ```
 다른 터미널에서 `echo world >> /tmp/ps-test/a.txt` 를 실행한 뒤 3~5초 기다린다.
@@ -3812,7 +3812,7 @@ Expected: 로그에 `Uploaded /tmp/ps-test under label 테스트` 가 찍힌다.
 
 검증:
 ```bash
-ssh dgson@ai 'cat ~/private-sync/store/테스트/ps-test/a.txt'
+ssh user@sync-server 'cat ~/private-sync/store/테스트/ps-test/a.txt'
 ```
 Expected: `hello` 와 `world` 두 줄
 
@@ -3843,7 +3843,7 @@ systemctl --user status 2>&1 | head -3
 ```bash
 rm -r /tmp/ps-test
 rm /tmp/ps-agent.yaml
-ssh dgson@ai 'rm -r ~/private-sync/store/테스트'
+ssh user@sync-server 'rm -r ~/private-sync/store/테스트'
 ```
 
 README에 변경이 생겼으면 커밋한다.

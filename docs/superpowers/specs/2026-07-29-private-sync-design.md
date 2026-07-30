@@ -4,20 +4,20 @@
 
 ## 배경과 목적
 
-SKB 과제 보안 지침에 따라 업무 자료를 외부 저장소(Google Docs, Office365, 개인 웹드라이브)에
+회사 보안 지침에 따라 업무 자료를 외부 저장소(Google Docs, Office365, 개인 웹드라이브)에
 두는 것이 금지되었다. 사내 NAS와 개인 노트북만 허용된다.
 
 지금까지 외부 저장소가 담당하던 "노트북 자료를 사내 서버에 올려두고, 외부에서 필요할 때 폰으로
 꺼내 본다"는 흐름을 규정을 지키면서 대체하는 것이 목적이다.
 
-핵심 제약은 네트워크다. 사내 DGX 서버(`dgson@ai`, 호스트 `aitopatom-b476`)는 외부 인터넷으로
+핵심 제약은 네트워크다. 사내 DGX 서버(`user@sync-server`)는 외부 인터넷으로
 나갈 수는 있지만 외부에서 들어올 수는 없다. 따라서 서버가 텔레그램 쪽으로 나가서 명령을 받아오는
 롱폴링(`getUpdates`) 방식을 쓴다. 서버에 인바운드 포트를 열지 않는다.
 
-### 확인된 환경
+### 필요 환경
 
-- DGX 서버: Python 3.12.3, `/usr/bin/rsync` 존재, 루트 파티션 746G 여유
-- `ssh dgson@ai` SSH 키 인증으로 비밀번호 없이 접속 가능 (`BatchMode=yes` 성공)
+- DGX 서버: Python 3.11 이상, `rsync` 존재, 저장소가 쌓일 여유 공간이 있는 루트 파티션
+- `ssh user@sync-server` SSH 키 인증으로 비밀번호 없이 접속 가능해야 한다 (`BatchMode=yes`로 확인)
 - 참고 구현: `nol-booking/telegram_control.py` (requests + getUpdates 롱폴링, 순수 함수 dispatch)
 
 ## 결정 사항
@@ -64,13 +64,13 @@ agent와 bot은 서로 다른 장비에서 돌기 때문에 설정 파일도 각
 ```yaml
 # 노트북: agent.yaml
 remote:
-  host: dgson@ai
+  host: user@sync-server
   store: ~/private-sync/store
 
 sources:
-  - label: SKT 문서
+  - label: 업무 문서
     paths:
-      - ~/Documents/skt/            # 디렉토리 전체
+      - ~/Documents/work/            # 디렉토리 전체
       - ~/work/견적서_v3.xlsx        # 파일 하나만
       - ~/work/회의록.md
     exclude: ["*.tmp"]              # 내장 기본 제외 목록에 추가된다
@@ -111,7 +111,7 @@ store: ~/private-sync/store
    부모 디렉토리를 감시하고 해당 경로만 통과시키는 필터를 건다.
 2. exclude 패턴에 걸리면 버린다.
 3. 3초 디바운스로 묶는다. 에디터의 연속 저장과 임시파일 생성·삭제를 한 번의 전송으로 합치기 위함이다.
-4. `rsync -az --partial` 로 `dgson@ai:~/private-sync/store/<라벨>/` 에 전송한다.
+4. `rsync -az --partial` 로 `user@sync-server:~/private-sync/store/<라벨>/` 에 전송한다.
    `shell=True` 없이 인수 배열로 호출한다.
 5. 삭제는 전파하지 않는다(`--delete` 미사용).
 

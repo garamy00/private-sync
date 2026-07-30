@@ -13,7 +13,7 @@ from private_sync.agent.uploader import (
 from private_sync.config import RemoteConfig
 from private_sync.errors import RetryableUploadError, UploadError
 
-REMOTE = RemoteConfig(host="dgson@ai", store="private-sync/store")
+REMOTE = RemoteConfig(host="user@sync-server", store="private-sync/store")
 
 
 def _ok(_args, _timeout):
@@ -31,7 +31,7 @@ def _failing(code, stderr=""):
 
 def test_rsync_args_keep_directory_name_and_apply_excludes():
     args = build_rsync_args(
-        REMOTE, "SKT 문서", Path("/Users/me/Documents/skt"), (".DS_Store", ".git/")
+        REMOTE, "업무 문서", Path("/Users/me/Documents/work"), (".DS_Store", ".git/")
     )
 
     assert args[0] == "rsync"
@@ -39,10 +39,10 @@ def test_rsync_args_keep_directory_name_and_apply_excludes():
     assert "-s" not in args
     assert "--exclude=.DS_Store" in args
     assert "--exclude=.git/" in args
-    # 트레일링 슬래시가 없어야 원격에 skt/ 디렉토리째로 생성된다
-    assert args[-2] == "/Users/me/Documents/skt"
+    # 트레일링 슬래시가 없어야 원격에 work/ 디렉토리째로 생성된다
+    assert args[-2] == "/Users/me/Documents/work"
     # 공백이 든 원격 경로는 원격 셸이 쪼개지 않도록 따옴표로 감싼다
-    assert args[-1] == "dgson@ai:'private-sync/store/SKT 문서/'"
+    assert args[-1] == "user@sync-server:'private-sync/store/업무 문서/'"
 
 
 def test_rsync_args_for_single_file():
@@ -50,21 +50,21 @@ def test_rsync_args_for_single_file():
 
     assert args[-2] == "/Users/me/work/견적서.xlsx"
     # 한글은 shlex 기준 안전 문자가 아니라 따옴표가 붙는다
-    assert args[-1] == "dgson@ai:'private-sync/store/메모/'"
+    assert args[-1] == "user@sync-server:'private-sync/store/메모/'"
 
 
 def test_rsync_args_leave_plain_ascii_path_unquoted():
     args = build_rsync_args(REMOTE, "docs", Path("/Users/me/docs"), ())
 
-    assert args[-1] == "dgson@ai:private-sync/store/docs/"
+    assert args[-1] == "user@sync-server:private-sync/store/docs/"
 
 
 def test_mkdir_args_quote_label_with_spaces():
-    args = build_mkdir_args(REMOTE, "SKT 문서")
+    args = build_mkdir_args(REMOTE, "업무 문서")
 
     assert args[0] == "ssh"
-    assert args[-2] == "dgson@ai"
-    assert args[-1] == "mkdir -p 'private-sync/store/SKT 문서'"
+    assert args[-2] == "user@sync-server"
+    assert args[-1] == "mkdir -p 'private-sync/store/업무 문서'"
 
 
 def test_upload_runs_mkdir_then_rsync():
@@ -162,7 +162,7 @@ def test_built_rsync_args_actually_work_with_the_real_rsync_binary(tmp_path):
     dest = tmp_path / "dest"
     dest.mkdir()
 
-    args = build_rsync_args(REMOTE, "SKT 문서", source, ("*.tmp",))
+    args = build_rsync_args(REMOTE, "업무 문서", source, ("*.tmp",))
     # 원격 목적지만 로컬 경로로 교체한다. 나머지 인수는 운영과 동일하다.
     args[-1] = f"{dest}/"
 

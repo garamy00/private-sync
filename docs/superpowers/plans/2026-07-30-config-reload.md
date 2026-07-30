@@ -342,7 +342,7 @@ class _FakeObserver:
 def _yaml(label, path):
     return f"""
 remote:
-  host: dgson@ai
+  host: user@sync-server
   store: store
 sources:
   - label: {label}
@@ -395,7 +395,7 @@ def test_reload_queues_only_newly_added_targets(tmp_path):
     runtime.config_path.write_text(
         f"""
 remote:
-  host: dgson@ai
+  host: user@sync-server
   store: store
 sources:
   - label: 문서
@@ -653,7 +653,7 @@ SSH가 없는 환경이면 업로드는 실패하겠지만 리로드 자체는 �
 mkdir -p /tmp/reload-a /tmp/reload-b
 cat > /tmp/reload.yaml <<'EOF'
 remote:
-  host: dgson@ai
+  host: user@sync-server
   store: ~/private-sync/store
 sources:
   - label: 첫번째

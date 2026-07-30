@@ -59,8 +59,9 @@ python3.11 -m venv .venv
 
 **rsync 참고**: 노트북(macOS) 기본 `rsync`는 Apple의 openrsync(프로토콜 29)이며 GNU
 rsync 3.x가 아니다. 이 도구는 openrsync 기준으로 동작하도록 만들어져 있어 별도 조치가
-필요 없다(Homebrew rsync가 PATH 앞쪽에 있어도 무방하다). 서버(DGX)에는 Python 3.12.3,
-rsync 3.2.7이 이미 설치되어 있고 `/` 기준 746G 여유 공간을 확인했다.
+필요 없다(Homebrew rsync가 PATH 앞쪽에 있어도 무방하다). 서버에는 Python 3.11 이상과
+`rsync`가 설치되어 있어야 하며, 저장소가 쌓일 수 있도록 충분한 여유 공간이 있는지
+미리 확인한다.
 
 ## 노트북 설정
 
@@ -97,14 +98,14 @@ launchctl list | grep private-sync   # 로드되어 PID가 찍히는지 확인
 with N watch targets` 가 찍혀야 실제로 시작된 것이다. 등록을 해제하려면
 `launchctl unload ~/Library/LaunchAgents/com.private-sync.agent.plist`.
 
-**실제 업로드 검증 결과**: 공백과 한글이 섞인 라벨(`SKT 검증`)로 디렉토리 하나와
+**실제 업로드 검증 결과**: 공백과 한글이 섞인 라벨(`업무 문서 검증`)로 디렉토리 하나와
 파일 하나를 함께 등록해 실제 DGX 서버에 대해 확인했다.
 
 - watchdog이 변경을 감지하고 ~3초 디바운스 후 업로드했다(로그
-  `Uploaded .../ps-test under label SKT 검증`, `Uploaded .../quote.xlsx under label SKT 검증`).
+  `Uploaded .../ps-test under label 업무 문서 검증`, `Uploaded .../quote.xlsx under label 업무 문서 검증`).
 - 노트북과 서버의 파일 sha256이 세 파일 모두 정확히 일치했다.
-- 디렉토리로 등록한 경로는 하위 구조를 그대로 유지한다(`SKT 검증/ps-test/sub/b.md`).
-  파일 하나만 등록한 경우에는 라벨 바로 아래에 놓인다(`SKT 검증/quote.xlsx`).
+- 디렉토리로 등록한 경로는 하위 구조를 그대로 유지한다(`업무 문서 검증/ps-test/sub/b.md`).
+  파일 하나만 등록한 경우에는 라벨 바로 아래에 놓인다(`업무 문서 검증/quote.xlsx`).
 - `.DS_Store`는 기본 제외 목록대로 서버에 하나도 올라오지 않았다.
 
 ## 서버 설정
@@ -113,14 +114,14 @@ with N watch targets` 가 찍혀야 실제로 시작된 것이다. 등록을 해
 (즉 정확히 `~/private-sync`)를 가리키므로, 저장소는 반드시 그 경로에 clone한다.
 
 ```bash
-ssh dgson@ai
+ssh user@sync-server
 git clone <repo> ~/private-sync
 cd ~/private-sync
 mkdir -p ~/private-sync/store ~/.config/private-sync ~/.config/systemd/user
 
-# 서버는 Python 3.12.3, rsync 3.2.7 이 이미 설치되어 있고 / 기준 746G 여유가 있어
-# 별도 준비 없이 바로 쓸 수 있다
-python3.12 -m venv .venv
+# 서버에 Python 3.11 이상과 rsync 가 설치되어 있는지, 저장소가 쌓일 여유 공간이
+# 있는지 먼저 확인한다 (노트북 설정의 "python3.11 명령이 없다면" 항목 참고)
+python3.11 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 ```
 
@@ -147,20 +148,19 @@ EOF
 ```bash
 # 세션이 끊겨도 user systemd 인스턴스가 살아 있어야 봇이 계속 떠 있다.
 # enable-linger 없이 등록하면 SSH 연결이 끊기는 순간 봇도 함께 죽는다.
-loginctl enable-linger dgson
-loginctl show-user dgson -p Linger   # Linger=yes 가 나와야 한다
+loginctl enable-linger "$USER"
+loginctl show-user "$USER" -p Linger   # Linger=yes 가 나와야 한다
 
 cp deploy/private-sync-bot.service ~/.config/systemd/user/
 systemctl --user enable --now private-sync-bot
 ```
 
-**서버 확인 결과**: `ssh dgson@ai 'systemctl --user status'`가 정상 동작함을 확인했다
-(호스트 `aitopatom-b476`, 유닛 478개 로드됨). 따라서 위의 `systemctl --user` 방식이
-이 서버에서 쓸 수 있는 정식 방법이다. 다만 `loginctl show-user dgson -p Linger`가
-기본값 `Linger=no`였으므로, **`enable-linger` 없이 그냥 서비스만 등록하면 SSH 세션이
-끊기자마자 봇 프로세스도 함께 종료된다** — 이 프로젝트가 애초에 피하려던 실패 양상과
-같다. 위 순서대로 `enable-linger`를 먼저 적용하고 `Linger=yes`로 바뀐 것을 확인한 뒤
-서비스를 등록할 것.
+**서버 확인**: `ssh user@sync-server 'systemctl --user status'`가 정상 동작하는지 먼저
+확인한다. 정상 동작하면 위 `systemctl --user` 방식을 그대로 쓸 수 있다. 다만 계정에
+따라 `loginctl show-user "$USER" -p Linger`의 기본값이 `Linger=no`인 경우가 있으므로,
+**`enable-linger` 없이 그냥 서비스만 등록하면 SSH 세션이 끊기자마자 봇 프로세스도 함께
+종료된다** — 이 프로젝트가 애초에 피하려던 실패 양상과 같다. 위 순서대로
+`enable-linger`를 먼저 적용하고 `Linger=yes`로 바뀐 것을 확인한 뒤 서비스를 등록할 것.
 
 사내 정책상 `enable-linger`가 거부되는 계정이라면(권한 부족 등), 아래 crontab 방식을
 대신 쓴다. 이 경우 재부팅 시에만 자동 시작되고, 그 사이 프로세스가 죽으면 수동으로
