@@ -14,7 +14,9 @@ from pathlib import Path
 
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
+from watchdog.observers.api import BaseObserver
 
+from private_sync.agent.config_watch import ConfigWatcher
 from private_sync.agent.pending import PendingItem, PendingStore
 from private_sync.agent.uploader import upload
 from private_sync.agent.watcher import (
@@ -134,6 +136,21 @@ class LoopState:
     stop: threading.Event
 
 
+@dataclass
+class AgentRuntime:
+    """리로드할 때 함께 갱신되는 구성요소 묶음.
+
+    넷 이상을 함께 바꿔야 상태가 어긋나지 않으므로 개별 인자로 넘기지 않는다.
+    """
+
+    worker: SyncWorker
+    handler: _EventHandler
+    observer: BaseObserver
+    config_path: Path
+    targets: list[WatchTarget]
+    watcher: ConfigWatcher
+
+
 class _EventHandler(FileSystemEventHandler):
     """watchdog 이벤트를 디바운서에 넣는다."""
 
@@ -187,18 +204,89 @@ def queue_initial_sync(worker: SyncWorker, targets: list[WatchTarget]) -> None:
     logger.info("Queued %d target(s) for initial sync", len(targets))
 
 
-def _run_loop(worker: SyncWorker, state: LoopState) -> None:
-    """디바운스가 끝난 항목을 큐에 넣고 업로드를 시도한다."""
+def _schedule_targets(
+    observer: BaseObserver, handler: _EventHandler, targets: list[WatchTarget]
+) -> None:
+    """observer의 기존 등록을 모두 지우고 새 대상으로 다시 등록한다."""
+    observer.unschedule_all()
+    for watch_dir, recursive in {(t.watch_dir, t.recursive) for t in targets}:
+        observer.schedule(handler, str(watch_dir), recursive=recursive)
+
+
+def _log_label_changes(before: list[WatchTarget], after: list[WatchTarget]) -> None:
+    """설정에서 사라진 라벨을 경고로 남긴다.
+
+    서버의 해당 폴더는 지우지 않는다. 삭제를 전파하지 않는 기존 원칙대로이며,
+    오타 한 번으로 백업본이 사라지지 않게 하기 위함이다.
+    """
+    removed = {t.label for t in before} - {t.label for t in after}
+    for label in sorted(removed):
+        logger.warning("Label %s left the config, its files stay on the server", label)
+
+
+def _reload_config(runtime: AgentRuntime) -> bool:
+    """설정을 다시 읽어 런타임 전체에 적용한다.
+
+    실패하면 아무것도 바꾸지 않고 False를 반환한다. 저장 도중에 읽혔거나 오타가
+    있을 뿐이므로 데몬은 계속 돌아야 한다. 고쳐서 저장하면 mtime이 다시 바뀌므로
+    자동으로 재시도된다.
+    """
+    try:
+        config = load_agent_config(runtime.config_path)
+    except ConfigError as exc:
+        logger.error("Keeping previous settings, config reload failed: %s", exc)
+        return False
+
+    targets = build_targets(config.sources)
+    known = {(t.label, str(t.path)) for t in runtime.targets}
+    added = [t for t in targets if (t.label, str(t.path)) not in known]
+
+    runtime.worker.replace_config(config)
+    runtime.handler.replace_targets(targets)
+    _schedule_targets(runtime.observer, runtime.handler, targets)
+    _log_label_changes(runtime.targets, targets)
+    runtime.targets = targets
+
+    # 새로 추가된 대상만 훑는다. 추가하고도 건드리기 전까지 안 올라가면
+    # 초기 동기화로 막아둔 문제가 되살아난다.
+    for target in added:
+        runtime.worker.enqueue(target.label, target.path)
+
+    logger.info(
+        "Config reloaded: %d target(s), %d newly queued", len(targets), len(added)
+    )
+    return True
+
+
+def _run_loop(runtime: AgentRuntime, state: LoopState) -> None:
+    """설정 변경을 반영하고, 디바운스가 끝난 항목을 큐에 넣어 업로드한다."""
     while not state.stop.is_set():
+        if runtime.watcher.changed():
+            try:
+                _reload_config(runtime)
+            except OSError as exc:
+                # 기존 watch를 이미 해제한 뒤라 감시가 하나도 없는 채로 남는다.
+                # 정상인 척하며 아무것도 동기화하지 않느니 시끄럽게 멈춘다.
+                logger.critical(
+                    "Cannot re-register watches after reload, stopping: %s",
+                    type(exc).__name__,
+                )
+                state.stop.set()
+                break
+
         with state.lock:
             ready = state.debouncer.due(time.monotonic())
         for label, path in ready:
-            worker.enqueue(label, Path(path))
+            runtime.worker.enqueue(label, Path(path))
 
-        worker.drain()
+        runtime.worker.drain()
 
         # 대기 항목이 남았다면 오프라인이므로 backoff만큼 쉬고 다시 시도한다
-        wait_sec = worker.backoff.delay() if worker.has_pending() else _TICK_SEC
+        wait_sec = (
+            runtime.worker.backoff.delay()
+            if runtime.worker.has_pending()
+            else _TICK_SEC
+        )
         state.stop.wait(wait_sec)
 
 
@@ -228,8 +316,16 @@ def main(argv: list[str] | None = None) -> int:
 
     observer = Observer()
     handler = _EventHandler(targets, state)
-    for watch_dir, recursive in {(t.watch_dir, t.recursive) for t in targets}:
-        observer.schedule(handler, str(watch_dir), recursive=recursive)
+    _schedule_targets(observer, handler, targets)
+
+    runtime = AgentRuntime(
+        worker=worker,
+        handler=handler,
+        observer=observer,
+        config_path=args.config,
+        targets=targets,
+        watcher=ConfigWatcher(args.config),
+    )
 
     signal.signal(signal.SIGTERM, lambda *_: state.stop.set())
     signal.signal(signal.SIGINT, lambda *_: state.stop.set())
@@ -238,7 +334,7 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("Agent started with %d watch targets", len(targets))
     queue_initial_sync(worker, targets)
     try:
-        _run_loop(worker, state)
+        _run_loop(runtime, state)
     finally:
         observer.stop()
         observer.join(timeout=5)

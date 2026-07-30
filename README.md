@@ -76,6 +76,10 @@ cp config.example.yaml ~/.config/private-sync/agent.yaml
 하나의 경로를 정말로 제외하고 싶다면 그 경로를 참조하는 모든 source의 `exclude`에
 같은 패턴을 넣어야 한다.
 
+`agent.yaml`을 저장하면 몇 초 안에 자동으로 반영되므로 재시작이 필요 없다. 설정에
+오류가 있으면 이전 설정을 유지한 채 로그에 남기고 계속 동작하며, 고쳐서 저장하면
+다시 반영된다. 라벨을 지워도 서버의 기존 파일은 그대로 남는다.
+
 자동 시작(macOS LaunchAgent). **아래 `sed` 명령은 반드시 저장소 루트(clone한
 디렉토리)에서 실행한다** — plist의 `CHANGEME` 경로를 실제 설치 경로로 바꿔치기하기
 위해 현재 디렉토리(`$PWD`)를 사용하기 때문이다. 어디에 clone했든 그대로 동작한다.
