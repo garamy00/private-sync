@@ -1733,7 +1733,7 @@ git commit -m "feat: agent 데몬 진입점 추가"
 **Interfaces:**
 - Consumes: `private_sync.errors.StoreError`
 - Produces:
-  - `private_sync.bot.store`: `Entry(name: str, rel: str, is_dir: bool, size: int)` (frozen), `resolve_safe(root: Path, rel: str) -> Path`, `list_dir(root: Path, rel: str) -> list[Entry]`, `search(root: Path, keyword: str, limit: int = 50) -> list[Entry]`, `parent_rel(rel: str) -> str | None`
+  - `private_sync.bot.store`: `Entry(name: str, rel: str, is_dir: bool, size: int)` (frozen), `_is_inside(base: Path, candidate: Path) -> bool`, `resolve_safe(root: Path, rel: str) -> Path`, `list_dir(root: Path, rel: str) -> list[Entry]`, `search(root: Path, keyword: str, limit: int = 50) -> list[Entry]`, `parent_rel(rel: str) -> str | None`
   - `rel` 은 저장소 루트 기준 POSIX 상대경로 문자열이며 루트는 `""` 이다.
 
 - [ ] **Step 1: 실패하는 테스트 작성**
@@ -1741,6 +1741,8 @@ git commit -m "feat: agent 데몬 진입점 추가"
 `tests/test_store.py`:
 
 ```python
+import logging
+
 import pytest
 
 from private_sync.bot.store import (
@@ -1827,6 +1829,47 @@ def test_parent_rel_walks_up_to_root():
     assert parent_rel("SKT 문서/sub") == "SKT 문서"
     assert parent_rel("SKT 문서") == ""
     assert parent_rel("") is None
+
+
+def test_list_dir_rejects_non_directory(store):
+    with pytest.raises(StoreError, match="not a directory"):
+        list_dir(store, "SKT 문서/계약서.docx")
+
+
+def test_symlink_escaping_store_is_hidden_and_unreadable(store, tmp_path):
+    outside = tmp_path / "outside.txt"
+    outside.write_text("SECRET", encoding="utf-8")
+    (store / "메모" / "link.txt").symlink_to(outside)
+
+    # 내용은 물론 이름·크기조차 노출되지 않아야 한다
+    assert "link.txt" not in [e.name for e in list_dir(store, "메모")]
+    assert search(store, "link") == []
+    with pytest.raises(StoreError, match="outside the store"):
+        resolve_safe(store, "메모/link.txt")
+
+
+def test_symlink_inside_store_stays_visible(store):
+    (store / "메모" / "바로가기.docx").symlink_to(store / "SKT 문서" / "계약서.docx")
+
+    assert "바로가기.docx" in [e.name for e in list_dir(store, "메모")]
+
+
+def test_sibling_directory_sharing_name_prefix_is_rejected(store):
+    evil = store.parent / (store.name + "-evil")
+    evil.mkdir()
+    (evil / "leak.txt").write_text("x", encoding="utf-8")
+
+    # 문자열 접두사 비교였다면 통과했을 경로다
+    with pytest.raises(StoreError, match="outside the store"):
+        resolve_safe(store, f"../{evil.name}/leak.txt")
+
+
+def test_search_does_not_report_truncation_when_results_fit(store, caplog):
+    with caplog.at_level(logging.INFO):
+        results = search(store, "계약", limit=2)
+
+    assert len(results) == 2
+    assert "truncated" not in caplog.text
 ```
 
 - [ ] **Step 2: 테스트가 실패하는지 확인**
@@ -1860,6 +1903,15 @@ class Entry:
     size: int
 
 
+def _is_inside(base: Path, candidate: Path) -> bool:
+    """이미 resolve된 후보 경로가 저장소 루트 안(또는 루트 자신)인지 판단한다.
+
+    문자열 접두사 비교는 `store-evil` 같은 형제 디렉토리에 뚫리므로 `parents`
+    멤버십으로 확인한다.
+    """
+    return candidate == base or base in candidate.parents
+
+
 def resolve_safe(root: Path, rel: str) -> Path:
     """상대경로를 저장소 루트 안의 실제 경로로 바꾼다.
 
@@ -1872,10 +1924,10 @@ def resolve_safe(root: Path, rel: str) -> Path:
     base = root.resolve()
     candidate = (base / rel).resolve()
 
-    if candidate != base and base not in candidate.parents:
-        raise StoreError("path %r resolves outside the store" % rel)
+    if not _is_inside(base, candidate):
+        raise StoreError(f"path {rel!r} resolves outside the store")
     if not candidate.exists():
-        raise StoreError("path %r not found in store" % rel)
+        raise StoreError(f"path {rel!r} not found in store")
     return candidate
 
 
@@ -1885,11 +1937,17 @@ def list_dir(root: Path, rel: str) -> list[Entry]:
     Raises:
         StoreError: 경로가 루트를 벗어나거나 디렉토리가 아닐 때.
     """
+    base = root.resolve()
     target = resolve_safe(root, rel)
     if not target.is_dir():
-        raise StoreError("path %r is not a directory" % rel)
+        raise StoreError(f"path {rel!r} is not a directory")
 
-    entries = [_to_entry(child, rel) for child in target.iterdir()]
+    # 저장소 밖을 가리키는 심볼릭 링크는 이름·크기조차 노출하지 않는다
+    entries = [
+        _to_entry(child, rel)
+        for child in target.iterdir()
+        if _is_inside(base, child.resolve())
+    ]
     return sorted(entries, key=lambda e: (not e.is_dir, e.name))
 
 
@@ -1901,16 +1959,25 @@ def search(root: Path, keyword: str, limit: int = 50) -> list[Entry]:
 
     base = root.resolve()
     results: list[Entry] = []
+    truncated = False
     for path in sorted(base.rglob("*")):
-        if len(results) >= limit:
-            logger.info("Search for %r truncated at %d results", keyword, limit)
-            break
         if not path.is_file() or needle not in path.name.lower():
             continue
+        if not _is_inside(base, path.resolve()):
+            continue
+
+        # 한도를 넘는 '실제 일치'를 만났을 때만 절단으로 기록한다
+        if len(results) >= limit:
+            truncated = True
+            break
+
         rel = str(PurePosixPath(path.relative_to(base)))
         results.append(
             Entry(name=path.name, rel=rel, is_dir=False, size=path.stat().st_size)
         )
+
+    if truncated:
+        logger.info("Search for %r truncated at %d results", keyword, limit)
     return results
 
 
@@ -1937,7 +2004,7 @@ def _to_entry(path: Path, parent: str) -> Entry:
 - [ ] **Step 4: 테스트 통과 확인**
 
 Run: `.venv/bin/pytest tests/test_store.py -v`
-Expected: PASS (10 passed)
+Expected: PASS (15 passed)
 
 - [ ] **Step 5: 린트와 커밋**
 
@@ -3267,7 +3334,7 @@ Run:
 ```bash
 .venv/bin/ruff format src tests && .venv/bin/ruff check src tests && .venv/bin/pytest -q
 ```
-Expected: 82 passed
+Expected: 87 passed
 
 ```bash
 git add src/private_sync/bot/main.py tests/test_bot_main.py
@@ -3445,7 +3512,7 @@ Run:
 ```bash
 .venv/bin/ruff format src tests && .venv/bin/ruff check src tests && .venv/bin/pytest -q
 ```
-Expected: 82 passed
+Expected: 87 passed
 
 ```bash
 git add README.md deploy
