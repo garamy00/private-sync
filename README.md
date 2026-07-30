@@ -55,6 +55,11 @@ python3.11 -m venv .venv
 .venv/bin/python --version
 ```
 
+**rsync 참고**: 노트북(macOS) 기본 `rsync`는 Apple의 openrsync(프로토콜 29)이며 GNU
+rsync 3.x가 아니다. 이 도구는 openrsync 기준으로 동작하도록 만들어져 있어 별도 조치가
+필요 없다(Homebrew rsync가 PATH 앞쪽에 있어도 무방하다). 서버(DGX)에는 Python 3.12.3,
+rsync 3.2.7이 이미 설치되어 있고 `/` 기준 746G 여유 공간을 확인했다.
+
 ## 노트북 설정
 
 ```bash
@@ -80,41 +85,52 @@ launchctl load ~/Library/LaunchAgents/com.private-sync.agent.plist
 로그는 `~/Library/Logs/private-sync-agent.log`에 쌓인다. 등록을 해제하려면
 `launchctl unload ~/Library/LaunchAgents/com.private-sync.agent.plist`.
 
+**실제 업로드 검증 결과**: 공백과 한글이 섞인 라벨(`SKT 검증`)로 디렉토리 하나와
+파일 하나를 함께 등록해 실제 DGX 서버에 대해 확인했다.
+
+- watchdog이 변경을 감지하고 ~3초 디바운스 후 업로드했다(로그
+  `Uploaded .../ps-test under label SKT 검증`, `Uploaded .../quote.xlsx under label SKT 검증`).
+- 노트북과 서버의 파일 sha256이 세 파일 모두 정확히 일치했다.
+- 디렉토리로 등록한 경로는 하위 구조를 그대로 유지한다(`SKT 검증/ps-test/sub/b.md`).
+  파일 하나만 등록한 경우에는 라벨 바로 아래에 놓인다(`SKT 검증/quote.xlsx`).
+- `.DS_Store`는 기본 제외 목록대로 서버에 하나도 올라오지 않았다.
+
 ## 서버 설정
 
 ```bash
 ssh dgson@ai
 mkdir -p ~/private-sync/store ~/.config/private-sync
-# 저장소 코드를 서버에 배치하고 venv 를 만든다 (서버는 Python 3.12.3 이 이미 설치되어 있어
-# 별도로 3.11+ 를 준비할 필요가 없다)
+# 저장소 코드를 서버에 배치하고 venv 를 만든다 (서버는 Python 3.12.3, rsync 3.2.7 이 이미
+# 설치되어 있고 / 기준 746G 여유가 있어 별도 준비 없이 바로 쓸 수 있다)
 python3.12 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 cp config.example.yaml ~/.config/private-sync/bot.yaml   # store 항목만 남긴다
 install -m 600 /dev/null ~/.config/private-sync/bot.env  # 토큰·chat_id·ZIP 암호
+
+# 세션이 끊겨도 user systemd 인스턴스가 살아 있어야 봇이 계속 떠 있다.
+# enable-linger 없이 등록하면 SSH 연결이 끊기는 순간 봇도 함께 죽는다.
+loginctl enable-linger dgson
+loginctl show-user dgson -p Linger   # Linger=yes 가 나와야 한다
+
 cp deploy/private-sync-bot.service ~/.config/systemd/user/
 systemctl --user enable --now private-sync-bot
 ```
 
-`systemctl --user` 를 쓸 수 없으면 대신 crontab에 아래를 넣는다.
+**서버 확인 결과**: `ssh dgson@ai 'systemctl --user status'`가 정상 동작함을 확인했다
+(호스트 `aitopatom-b476`, 유닛 478개 로드됨). 따라서 위의 `systemctl --user` 방식이
+이 서버에서 쓸 수 있는 정식 방법이다. 다만 `loginctl show-user dgson -p Linger`가
+기본값 `Linger=no`였으므로, **`enable-linger` 없이 그냥 서비스만 등록하면 SSH 세션이
+끊기자마자 봇 프로세스도 함께 종료된다** — 이 프로젝트가 애초에 피하려던 실패 양상과
+같다. 위 순서대로 `enable-linger`를 먼저 적용하고 `Linger=yes`로 바뀐 것을 확인한 뒤
+서비스를 등록할 것.
+
+사내 정책상 `enable-linger`가 거부되는 계정이라면(권한 부족 등), 아래 crontab 방식을
+대신 쓴다. 이 경우 재부팅 시에만 자동 시작되고, 그 사이 프로세스가 죽으면 수동으로
+다시 띄워야 한다.
 
 ```
 @reboot cd $HOME && set -a && . $HOME/.config/private-sync/bot.env && set +a && nohup $HOME/private-sync/.venv/bin/private-sync-bot --config $HOME/.config/private-sync/bot.yaml >> $HOME/private-sync-bot.log 2>&1 &
 ```
-
-**서버 확인 결과**: 이번 구현 세션에서는 샌드박스에서 `ssh dgson@ai`로 사내망
-(`192.168.5.78`)에 접속할 수 없어(포트 22 TCP 연결은 되지만 SSH 배너 교환 단계에서
-타임아웃) `systemctl --user status` 를 직접 실행해 확인하지 못했다. 실제 배포 시
-아래 명령으로 먼저 확인한 뒤 그 결과에 맞는 방식을 쓸 것.
-
-```bash
-ssh dgson@ai 'systemctl --user status 2>&1 | head -3'
-```
-
-- `Failed to connect to bus` 등의 오류가 나오면 systemd user 인스턴스가 없는 것이므로
-  위의 crontab 방식을 쓴다(리부팅 시에만 자동 시작되고, 그 사이 프로세스가 죽으면 수동으로
-  다시 띄워야 한다).
-- 정상적으로 상태가 출력되면 `systemctl --user enable --now private-sync-bot` 방식을
-  그대로 쓴다(재시작 정책 `Restart=always`가 적용되어 더 안전하다).
 
 ### 봇 검증 절차 (실제 텔레그램 토큰이 있는 사용자가 직접 수행)
 
