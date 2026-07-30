@@ -74,15 +74,19 @@ cp config.example.yaml ~/.config/private-sync/agent.yaml
 하나의 경로를 정말로 제외하고 싶다면 그 경로를 참조하는 모든 source의 `exclude`에
 같은 패턴을 넣어야 한다.
 
-자동 시작(macOS LaunchAgent):
+자동 시작(macOS LaunchAgent). **아래 `sed` 명령은 반드시 저장소 루트(clone한
+디렉토리)에서 실행한다** — plist의 `CHANGEME` 경로를 실제 설치 경로로 바꿔치기하기
+위해 현재 디렉토리(`$PWD`)를 사용하기 때문이다. 어디에 clone했든 그대로 동작한다.
 
 ```bash
-sed "s|CHANGEME|$USER|g" deploy/com.private-sync.agent.plist \
-  > ~/Library/LaunchAgents/com.private-sync.agent.plist
+sed -e "s|/Users/CHANGEME/source/python/private-sync|$PWD|g" -e "s|CHANGEME|$USER|g" \
+  deploy/com.private-sync.agent.plist > ~/Library/LaunchAgents/com.private-sync.agent.plist
 launchctl load ~/Library/LaunchAgents/com.private-sync.agent.plist
+launchctl list | grep private-sync   # 로드되어 PID가 찍히는지 확인
 ```
 
-로그는 `~/Library/Logs/private-sync-agent.log`에 쌓인다. 등록을 해제하려면
+로그는 `~/Library/Logs/private-sync-agent.log`에 쌓인다. 이 로그에 `Agent started
+with N watch targets` 가 찍혀야 실제로 시작된 것이다. 등록을 해제하려면
 `launchctl unload ~/Library/LaunchAgents/com.private-sync.agent.plist`.
 
 **실제 업로드 검증 결과**: 공백과 한글이 섞인 라벨(`SKT 검증`)로 디렉토리 하나와
@@ -97,16 +101,42 @@ launchctl load ~/Library/LaunchAgents/com.private-sync.agent.plist
 
 ## 서버 설정
 
+`deploy/private-sync-bot.service`의 `ExecStart`가 `%h/private-sync/.venv/bin/...`
+(즉 정확히 `~/private-sync`)를 가리키므로, 저장소는 반드시 그 경로에 clone한다.
+
 ```bash
 ssh dgson@ai
-mkdir -p ~/private-sync/store ~/.config/private-sync
-# 저장소 코드를 서버에 배치하고 venv 를 만든다 (서버는 Python 3.12.3, rsync 3.2.7 이 이미
-# 설치되어 있고 / 기준 746G 여유가 있어 별도 준비 없이 바로 쓸 수 있다)
+git clone <repo> ~/private-sync
+cd ~/private-sync
+mkdir -p ~/private-sync/store ~/.config/private-sync ~/.config/systemd/user
+
+# 서버는 Python 3.12.3, rsync 3.2.7 이 이미 설치되어 있고 / 기준 746G 여유가 있어
+# 별도 준비 없이 바로 쓸 수 있다
 python3.12 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
-cp config.example.yaml ~/.config/private-sync/bot.yaml   # store 항목만 남긴다
-install -m 600 /dev/null ~/.config/private-sync/bot.env  # 토큰·chat_id·ZIP 암호
+```
 
+`bot.yaml`은 `store` 항목 하나만 있으면 된다. 아래처럼 완성된 내용으로 만든다.
+
+```bash
+cat > ~/.config/private-sync/bot.yaml <<'EOF'
+store: ~/private-sync/store
+EOF
+```
+
+`bot.env`는 `chmod 600`으로 만들고, 아래 세 줄을 실제 값으로 채워 넣는다
+(`load_bot_config`가 정확히 이 세 이름을 읽는다).
+
+```bash
+install -m 600 /dev/null ~/.config/private-sync/bot.env
+cat > ~/.config/private-sync/bot.env <<'EOF'
+PRIVATE_SYNC_BOT_TOKEN=...
+PRIVATE_SYNC_CHAT_ID=...
+PRIVATE_SYNC_ZIP_PASSWORD=...
+EOF
+```
+
+```bash
 # 세션이 끊겨도 user systemd 인스턴스가 살아 있어야 봇이 계속 떠 있다.
 # enable-linger 없이 등록하면 SSH 연결이 끊기는 순간 봇도 함께 죽는다.
 loginctl enable-linger dgson
@@ -140,9 +170,12 @@ systemctl --user enable --now private-sync-bot
 1. 텔레그램에서 `@BotFather`로 봇을 만들고 토큰을 받는다.
 2. 만든 봇에게 아무 메시지나 보낸 뒤 chat_id를 확인한다:
    `curl -s "https://api.telegram.org/bot<TOKEN>/getUpdates" | grep -o '"id":[0-9-]*'`
-3. 서버에 `~/.config/private-sync/bot.env`를 `chmod 600`으로 만들고 토큰·chat_id·ZIP 암호를 넣는다.
-4. 봇을 포그라운드로 띄운다:
-   `set -a && . ~/.config/private-sync/bot.env && set +a && .venv/bin/private-sync-bot --config ~/.config/private-sync/bot.yaml --debug`
+3. 서버에 `~/.config/private-sync/bot.env`를 `chmod 600`으로 만들고
+   `PRIVATE_SYNC_BOT_TOKEN`, `PRIVATE_SYNC_CHAT_ID`, `PRIVATE_SYNC_ZIP_PASSWORD`
+   세 줄을 채운다(위 "서버 설정"의 예시 참고).
+4. 봇을 포그라운드로 띄운다(저장소 루트인 `~/private-sync`에서 실행해야
+   `.venv/bin/...` 상대 경로가 맞는다):
+   `cd ~/private-sync && set -a && . ~/.config/private-sync/bot.env && set +a && .venv/bin/private-sync-bot --config ~/.config/private-sync/bot.yaml --debug`
 5. 폰에서 확인한다: `/start`로 라벨 버튼이 보이는지 → 폴더를 타고 들어가 파일을 탭 →
    도착한 `.zip`을 압축 앱에서 비밀번호로 여는지 → `/find <키워드>`로 검색되는지.
 
@@ -160,6 +193,10 @@ systemctl --user enable --now private-sync-bot
 - 봇 토큰, chat_id, ZIP 암호는 환경변수로만 읽는다. YAML과 코드에 넣지 않는다.
 - 텔레그램에는 항상 암호 ZIP만 나간다. 서버 저장소에는 평문으로 둔다(사내 서버는 규정상
   허용 저장소).
+- 서버의 저장소 디렉토리(`~/private-sync/store`)는 git 저장소 clone 내부에 있다.
+  `.gitignore`의 `store/` 항목이 실수로 `git add`되는 것은 막아주지만, **`git clean -fdx`는
+  ignore된 파일까지 지운다.** 따라서 `~/private-sync`에서는 어떤 경우에도
+  `git clean -fdx`를 실행하지 않는다.
 - 등록된 chat_id 외의 입력은 응답 없이 무시한다. 다른 사람이 봇을 알아내 말을 걸어도
   아무 반응이 없다(에러 메시지조차 보내지 않는다).
 - 임시 ZIP은 전송 성공·실패와 무관하게 삭제된다.

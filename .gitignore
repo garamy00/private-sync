@@ -6,3 +6,4 @@ __pycache__/
 agent.yaml
 bot.yaml
 .pending.json
+store/
