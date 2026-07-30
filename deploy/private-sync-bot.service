@@ -1,0 +1,14 @@
+[Unit]
+Description=private-sync Telegram bot
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+EnvironmentFile=%h/.config/private-sync/bot.env
+ExecStart=%h/private-sync/.venv/bin/private-sync-bot --config %h/.config/private-sync/bot.yaml
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
