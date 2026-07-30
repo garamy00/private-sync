@@ -2049,6 +2049,8 @@ git commit -m "feat: 저장소 탐색과 경로 안전 검증 추가"
 `tests/test_packer.py`:
 
 ```python
+import os
+
 import pyzipper
 import pytest
 
@@ -2144,6 +2146,25 @@ def test_pack_for_send_rejects_missing_source(tmp_path):
 
     with pytest.raises(PackError, match="cannot read"):
         pack_for_send(tmp_path / "없음.txt", dest, password="pw")
+
+
+def test_split_file_wraps_os_errors_in_pack_error(tmp_path):
+    if os.geteuid() == 0:
+        pytest.skip("root ignores directory permissions")
+
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    target = locked / "big.zip"
+    target.write_bytes(b"x" * 100)
+    # 쓰기 금지 디렉토리에서는 파트 생성도 원본 삭제도 실패한다.
+    # 어느 쪽이든 raw OSError가 호출자에게 새어나가면 안 된다.
+    locked.chmod(0o555)
+
+    try:
+        with pytest.raises(PackError, match="cannot split"):
+            split_file(target, max_bytes=50)
+    finally:
+        locked.chmod(0o755)
 ```
 
 - [ ] **Step 2: 테스트가 실패하는지 확인**
@@ -2169,8 +2190,6 @@ logger = logging.getLogger(__name__)
 
 # 텔레그램 봇 sendDocument 한도가 50MB이므로 여유를 두고 45MB로 자른다
 MAX_PART_BYTES = 45 * 1024 * 1024
-
-_COPY_CHUNK = 1024 * 1024
 
 
 def make_encrypted_zip(src: Path, dest_dir: Path, password: str) -> Path:
@@ -2198,8 +2217,10 @@ def make_encrypted_zip(src: Path, dest_dir: Path, password: str) -> Path:
             zf.setpassword(password.encode("utf-8"))
             zf.write(src, arcname=src.name)
     except OSError as exc:
+        # 중간까지 쓰인 아카이브를 남기지 않는다
+        archive.unlink(missing_ok=True)
         raise PackError(
-            "cannot read or write while packing %s: %s" % (src.name, exc.strerror)
+            f"cannot read or write while packing {src.name}: {exc.strerror}"
         ) from exc
 
     logger.info("Packed %s into %s bytes", src.name, archive.stat().st_size)
@@ -2222,14 +2243,17 @@ def split_file(path: Path, max_bytes: int = MAX_PART_BYTES) -> list[Path]:
                 chunk = source.read(max_bytes)
                 if not chunk:
                     break
-                part = path.with_name("%s.part%02d" % (path.name, index))
+                part = path.with_name(f"{path.name}.part{index:02d}")
                 part.write_bytes(chunk)
                 parts.append(part)
                 index += 1
-    except OSError as exc:
-        raise PackError("cannot split %s: %s" % (path.name, exc.strerror)) from exc
 
-    path.unlink(missing_ok=True)
+        # 파트가 모두 쓰인 뒤에 원본을 지운다. 삭제 실패도 PackError로 감싸
+        # 호출자가 OSError를 따로 처리하지 않아도 되게 한다.
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        raise PackError(f"cannot split {path.name}: {exc.strerror}") from exc
+
     logger.info("Split %s into %d parts", path.name, len(parts))
     return parts
 
@@ -2257,7 +2281,7 @@ def pack_for_send(
 - [ ] **Step 4: 테스트 통과 확인**
 
 Run: `.venv/bin/pytest tests/test_packer.py -v`
-Expected: PASS (7 passed)
+Expected: PASS (8 passed)
 
 - [ ] **Step 5: 린트와 커밋**
 
@@ -3351,7 +3375,7 @@ Run:
 ```bash
 .venv/bin/ruff format src tests && .venv/bin/ruff check src tests && .venv/bin/pytest -q
 ```
-Expected: 88 passed
+Expected: 89 passed
 
 ```bash
 git add src/private_sync/bot/main.py tests/test_bot_main.py
@@ -3529,7 +3553,7 @@ Run:
 ```bash
 .venv/bin/ruff format src tests && .venv/bin/ruff check src tests && .venv/bin/pytest -q
 ```
-Expected: 88 passed
+Expected: 89 passed
 
 ```bash
 git add README.md deploy
