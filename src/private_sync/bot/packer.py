@@ -14,8 +14,6 @@ logger = logging.getLogger(__name__)
 # 텔레그램 봇 sendDocument 한도가 50MB이므로 여유를 두고 45MB로 자른다
 MAX_PART_BYTES = 45 * 1024 * 1024
 
-_COPY_CHUNK = 1024 * 1024
-
 
 def make_encrypted_zip(src: Path, dest_dir: Path, password: str) -> Path:
     """원본 파일 하나를 AES-256 암호 ZIP으로 포장한다.
@@ -42,6 +40,8 @@ def make_encrypted_zip(src: Path, dest_dir: Path, password: str) -> Path:
             zf.setpassword(password.encode("utf-8"))
             zf.write(src, arcname=src.name)
     except OSError as exc:
+        # 중간까지 쓰인 아카이브를 남기지 않는다
+        archive.unlink(missing_ok=True)
         raise PackError(
             f"cannot read or write while packing {src.name}: {exc.strerror}"
         ) from exc
@@ -70,10 +70,13 @@ def split_file(path: Path, max_bytes: int = MAX_PART_BYTES) -> list[Path]:
                 part.write_bytes(chunk)
                 parts.append(part)
                 index += 1
+
+        # 파트가 모두 쓰인 뒤에 원본을 지운다. 삭제 실패도 PackError로 감싸
+        # 호출자가 OSError를 따로 처리하지 않아도 되게 한다.
+        path.unlink(missing_ok=True)
     except OSError as exc:
         raise PackError(f"cannot split {path.name}: {exc.strerror}") from exc
 
-    path.unlink(missing_ok=True)
     logger.info("Split %s into %d parts", path.name, len(parts))
     return parts
 

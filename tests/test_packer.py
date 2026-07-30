@@ -1,3 +1,5 @@
+import os
+
 import pytest
 import pyzipper
 
@@ -93,3 +95,22 @@ def test_pack_for_send_rejects_missing_source(tmp_path):
 
     with pytest.raises(PackError, match="cannot read"):
         pack_for_send(tmp_path / "없음.txt", dest, password="pw")
+
+
+def test_split_file_wraps_os_errors_in_pack_error(tmp_path):
+    if os.geteuid() == 0:
+        pytest.skip("root ignores directory permissions")
+
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    target = locked / "big.zip"
+    target.write_bytes(b"x" * 100)
+    # 쓰기 금지 디렉토리에서는 파트 생성도 원본 삭제도 실패한다.
+    # 어느 쪽이든 raw OSError가 호출자에게 새어나가면 안 된다.
+    locked.chmod(0o555)
+
+    try:
+        with pytest.raises(PackError, match="cannot split"):
+            split_file(target, max_bytes=50)
+    finally:
+        locked.chmod(0o755)
