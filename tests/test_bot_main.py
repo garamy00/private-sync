@@ -11,7 +11,7 @@ from private_sync.bot.handlers import (
 )
 from private_sync.bot.main import Deliverer, _handle_one
 from private_sync.config import BotConfig
-from private_sync.errors import StoreError, TelegramError
+from private_sync.errors import PackError, StoreError, TelegramError
 
 
 class _SpyClient:
@@ -31,10 +31,29 @@ class _SpyClient:
         self.edits.append((chat_id, message_id, text, buttons))
 
     def send_document(self, chat_id, path, caption=""):
+        # 첫 파트만 성공시키고 그다음부터 실패시켜 부분 전송을 만든다
+        if self._fail_on == "document_after_1" and self.documents:
+            raise TelegramError("sendDocument returned status 500")
         self.documents.append((chat_id, Path(path).name, caption))
 
     def answer_callback(self, callback_id):
+        if self._fail_on == "answer":
+            raise TelegramError("answerCallbackQuery returned status 400")
         self.answered.append(callback_id)
+
+
+def _fake_pack(parts):
+    """지정한 개수의 가짜 파트 파일을 만드는 pack_for_send 대체품."""
+
+    def pack(src, dest_dir, password, max_bytes=None):
+        made = []
+        for index in range(1, parts + 1):
+            part = Path(dest_dir) / f"{src.name}.zip.part{index:02d}"
+            part.write_bytes(b"x")
+            made.append(part)
+        return made
+
+    return pack
 
 
 @pytest.fixture
@@ -128,6 +147,69 @@ def test_none_action_does_nothing(config):
 
     assert client.messages == []
     assert client.documents == []
+
+
+def test_send_document_failure_cleans_up_and_reports_partial(config, monkeypatch):
+    import private_sync.bot.main as bot_main
+
+    created = []
+    original = bot_main.tempfile.mkdtemp
+
+    def tracking_mkdtemp(*args, **kwargs):
+        path = original(*args, **kwargs)
+        created.append(Path(path))
+        return path
+
+    monkeypatch.setattr(bot_main.tempfile, "mkdtemp", tracking_mkdtemp)
+    # 3개 파트로 쪼개지도록 작은 한도를 준다
+    monkeypatch.setattr(bot_main, "pack_for_send", _fake_pack(parts=3))
+
+    client = _SpyClient(fail_on="document_after_1")
+    Deliverer(client, config).run(
+        SendFile(rel="메모/a.txt", caption="a.txt"), _callback()
+    )
+
+    assert len(client.documents) == 1
+    assert "이미 받은 파트는 지우고" in client.messages[-1][1]
+    # 실패해도 평문·암호문이 서버에 남으면 안 된다
+    assert created and not created[0].exists()
+
+
+def test_pack_failure_cleans_up_temp_dir(config, monkeypatch):
+    import private_sync.bot.main as bot_main
+
+    created = []
+    original = bot_main.tempfile.mkdtemp
+
+    def tracking_mkdtemp(*args, **kwargs):
+        path = original(*args, **kwargs)
+        created.append(Path(path))
+        return path
+
+    def exploding_pack(*_args, **_kwargs):
+        raise PackError("cannot read source file a.txt")
+
+    monkeypatch.setattr(bot_main.tempfile, "mkdtemp", tracking_mkdtemp)
+    monkeypatch.setattr(bot_main, "pack_for_send", exploding_pack)
+
+    client = _SpyClient()
+    Deliverer(client, config).run(
+        SendFile(rel="메모/a.txt", caption="a.txt"), _callback()
+    )
+
+    assert "포장하는 중 오류" in client.messages[-1][1]
+    assert created and not created[0].exists()
+
+
+def test_answer_callback_failure_does_not_abort_delivery(config):
+    client = _SpyClient(fail_on="answer")
+
+    Deliverer(client, config).run(
+        SendFile(rel="메모/a.txt", caption="a.txt"), _callback()
+    )
+
+    # 로딩 표시 해제 실패는 전달을 막지 않는다
+    assert len(client.documents) == 1
 
 
 def _start_update():

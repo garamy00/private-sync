@@ -45,6 +45,10 @@ _SPLIT_NOTICE = (
     "PC에서 아래 명령으로 합친 뒤 비밀번호를 입력해 열어주세요.\n"
     "cat {archive}.part* > {archive}"
 )
+_PARTIAL_SEND_MESSAGE = (
+    "전송이 {total}개 중 {sent}개 파트에서 끊겼습니다.\n"
+    "이미 받은 파트는 지우고 처음부터 다시 받아주세요."
+)
 
 
 class Deliverer:
@@ -89,7 +93,7 @@ class Deliverer:
         except TelegramError as exc:
             logger.error("Failed to deliver text response: %s", exc)
 
-    def _notify(self, text: str) -> None:
+    def notify(self, text: str) -> None:
         """사용자에게 짧은 안내를 보낸다."""
         try:
             self._client.send_message(self._config.chat_id, text)
@@ -102,26 +106,39 @@ class Deliverer:
             source = store.resolve_safe(self._config.store, action.rel)
         except StoreError as exc:
             logger.warning("Rejected file request %r: %s", action.rel, exc)
-            self._notify(_MISSING_FILE_MESSAGE)
+            self.notify(_MISSING_FILE_MESSAGE)
             return
 
         workdir = Path(tempfile.mkdtemp(prefix="private-sync-"))
+        sent = 0
         try:
             parts = pack_for_send(source, workdir, self._config.zip_password)
             for part in parts:
                 self._client.send_document(
                     self._config.chat_id, part, caption=part.name
                 )
+                sent += 1
+
             if len(parts) > 1:
                 archive = source.name + ".zip"
-                self._notify(_SPLIT_NOTICE.format(count=len(parts), archive=archive))
+                self.notify(_SPLIT_NOTICE.format(count=len(parts), archive=archive))
             logger.info("Delivered %s as %d part(s)", action.rel, len(parts))
         except PackError as exc:
             logger.error("Packing failed for %s: %s", action.rel, exc)
-            self._notify("파일을 포장하는 중 오류가 발생했습니다.")
-        except TelegramError as exc:
-            logger.error("Sending failed for %s: %s", action.rel, exc)
-            self._notify("파일 전송에 실패했습니다. 다시 시도해 주세요.")
+            self.notify("파일을 포장하는 중 오류가 발생했습니다.")
+        except (TelegramError, OSError) as exc:
+            logger.error(
+                "Sending failed for %s after %d part(s): %s",
+                action.rel,
+                sent,
+                type(exc).__name__,
+            )
+            # 이미 보낸 파트가 있으면 재시도 시 같은 이름의 파트가 섞인다.
+            # 사용자가 앞의 것을 버리도록 명시해야 결합 명령이 어긋나지 않는다.
+            if sent:
+                self.notify(_PARTIAL_SEND_MESSAGE.format(sent=sent, total=len(parts)))
+            else:
+                self.notify("파일 전송에 실패했습니다. 다시 시도해 주세요.")
         finally:
             # 평문·암호문 임시 파일을 남기지 않는다
             shutil.rmtree(workdir, ignore_errors=True)
@@ -143,20 +160,19 @@ def _handle_one(update: dict, context: Context, deliverer: Deliverer) -> None:
     if incoming is None:
         return
 
+    # 전달까지 감싸야 docstring 의 약속이 실제로 지켜진다. 하위 모듈이
+    # 계약을 어기고 raw OSError 를 던져도 봇 프로세스는 살아 있어야 한다.
     try:
         action = handle(incoming, context)
+        deliverer.run(action, incoming)
     except StoreError as exc:
         logger.warning("Store error while handling input: %s", exc)
-        deliverer.run(SendText(text=_MISSING_FILE_MESSAGE), incoming)
-        return
+        deliverer.notify(_MISSING_FILE_MESSAGE)
     except (PrivateSyncError, OSError) as exc:
         # 깨진 심볼릭 링크 같은 예상 밖 오류로 봇 프로세스가 죽으면,
         # 사용자는 외부에서 자료를 꺼낼 수단을 통째로 잃는다.
         logger.error("Unexpected error handling input: %s", type(exc).__name__)
-        deliverer.run(SendText(text=_INTERNAL_ERROR_MESSAGE), incoming)
-        return
-
-    deliverer.run(action, incoming)
+        deliverer.notify(_INTERNAL_ERROR_MESSAGE)
 
 
 def _serve(client: TelegramClient, config: BotConfig) -> None:
