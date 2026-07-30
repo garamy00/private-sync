@@ -3083,7 +3083,7 @@ git commit -m "feat: 텔레그램 Bot API 래퍼 추가"
 **Interfaces:**
 - Consumes: `load_bot_config`, `TelegramClient`, `handlers.extract`, `handlers.handle`, `handlers.Context`, `handlers.TokenMap`, `handlers.SendText`, `handlers.SendFile`, `store.list_dir`, `store.search`, `store.resolve_safe`, `packer.pack_for_send`, 예외들
 - Produces:
-  - `private_sync.bot.main`: `Deliverer(client: TelegramClient, config: BotConfig)` with `run(action: Action, incoming: Incoming) -> None`; `_handle_one(update: dict, context: Context, deliverer: Deliverer) -> None`; `main(argv: list[str] | None = None) -> int`
+  - `private_sync.bot.main`: `Deliverer(client: TelegramClient, config: BotConfig)` with `run(action: Action, incoming: Incoming) -> None`, `notify(text: str) -> None`; `_handle_one(update: dict, context: Context, deliverer: Deliverer) -> None`; `main(argv: list[str] | None = None) -> int`
 
 - [ ] **Step 1: 실패하는 테스트 작성**
 
@@ -3103,7 +3103,7 @@ from private_sync.bot.handlers import (
 )
 from private_sync.bot.main import Deliverer, _handle_one
 from private_sync.config import BotConfig
-from private_sync.errors import StoreError, TelegramError
+from private_sync.errors import PackError, StoreError, TelegramError
 
 
 class _SpyClient:
@@ -3123,10 +3123,29 @@ class _SpyClient:
         self.edits.append((chat_id, message_id, text, buttons))
 
     def send_document(self, chat_id, path, caption=""):
+        # 첫 파트만 성공시키고 그다음부터 실패시켜 부분 전송을 만든다
+        if self._fail_on == "document_after_1" and self.documents:
+            raise TelegramError("sendDocument returned status 500")
         self.documents.append((chat_id, Path(path).name, caption))
 
     def answer_callback(self, callback_id):
+        if self._fail_on == "answer":
+            raise TelegramError("answerCallbackQuery returned status 400")
         self.answered.append(callback_id)
+
+
+def _fake_pack(parts):
+    """지정한 개수의 가짜 파트 파일을 만드는 pack_for_send 대체품."""
+
+    def pack(src, dest_dir, password, max_bytes=None):
+        made = []
+        for index in range(1, parts + 1):
+            part = Path(dest_dir) / f"{src.name}.zip.part{index:02d}"
+            part.write_bytes(b"x")
+            made.append(part)
+        return made
+
+    return pack
 
 
 @pytest.fixture
@@ -3222,6 +3241,63 @@ def test_none_action_does_nothing(config):
     assert client.documents == []
 
 
+def test_send_document_failure_cleans_up_and_reports_partial(config, monkeypatch):
+    import private_sync.bot.main as bot_main
+
+    created = []
+    original = bot_main.tempfile.mkdtemp
+
+    def tracking_mkdtemp(*args, **kwargs):
+        path = original(*args, **kwargs)
+        created.append(Path(path))
+        return path
+
+    monkeypatch.setattr(bot_main.tempfile, "mkdtemp", tracking_mkdtemp)
+    # 3개 파트로 쪼개지도록 작은 한도를 준다
+    monkeypatch.setattr(bot_main, "pack_for_send", _fake_pack(parts=3))
+
+    client = _SpyClient(fail_on="document_after_1")
+    Deliverer(client, config).run(SendFile(rel="메모/a.txt", caption="a.txt"), _callback())
+
+    assert len(client.documents) == 1
+    assert "이미 받은 파트는 지우고" in client.messages[-1][1]
+    # 실패해도 평문·암호문이 서버에 남으면 안 된다
+    assert created and not created[0].exists()
+
+
+def test_pack_failure_cleans_up_temp_dir(config, monkeypatch):
+    import private_sync.bot.main as bot_main
+
+    created = []
+    original = bot_main.tempfile.mkdtemp
+
+    def tracking_mkdtemp(*args, **kwargs):
+        path = original(*args, **kwargs)
+        created.append(Path(path))
+        return path
+
+    def exploding_pack(*_args, **_kwargs):
+        raise PackError("cannot read source file a.txt")
+
+    monkeypatch.setattr(bot_main.tempfile, "mkdtemp", tracking_mkdtemp)
+    monkeypatch.setattr(bot_main, "pack_for_send", exploding_pack)
+
+    client = _SpyClient()
+    Deliverer(client, config).run(SendFile(rel="메모/a.txt", caption="a.txt"), _callback())
+
+    assert "포장하는 중 오류" in client.messages[-1][1]
+    assert created and not created[0].exists()
+
+
+def test_answer_callback_failure_does_not_abort_delivery(config):
+    client = _SpyClient(fail_on="answer")
+
+    Deliverer(client, config).run(SendFile(rel="메모/a.txt", caption="a.txt"), _callback())
+
+    # 로딩 표시 해제 실패는 전달을 막지 않는다
+    assert len(client.documents) == 1
+
+
 def _start_update():
     return {"message": {"text": "/start", "chat": {"id": 123}, "message_id": 1}}
 
@@ -3313,9 +3389,13 @@ _ERROR_SLEEP_SEC = 3
 _MISSING_FILE_MESSAGE = "파일을 찾을 수 없습니다. 동기화 대기 중이거나 삭제되었습니다."
 _INTERNAL_ERROR_MESSAGE = "요청을 처리하는 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
 _SPLIT_NOTICE = (
-    "파일이 커서 %d개로 나눠 보냈습니다.\n"
+    "파일이 커서 {count}개로 나눠 보냈습니다.\n"
     "PC에서 아래 명령으로 합친 뒤 비밀번호를 입력해 열어주세요.\n"
-    "cat %s.part* > %s"
+    "cat {archive}.part* > {archive}"
+)
+_PARTIAL_SEND_MESSAGE = (
+    "전송이 {total}개 중 {sent}개 파트에서 끊겼습니다.\n"
+    "이미 받은 파트는 지우고 처음부터 다시 받아주세요."
 )
 
 
@@ -3363,7 +3443,7 @@ class Deliverer:
         except TelegramError as exc:
             logger.error("Failed to deliver text response: %s", exc)
 
-    def _notify(self, text: str) -> None:
+    def notify(self, text: str) -> None:
         """사용자에게 짧은 안내를 보낸다."""
         try:
             self._client.send_message(self._config.chat_id, text)
@@ -3376,26 +3456,39 @@ class Deliverer:
             source = store.resolve_safe(self._config.store, action.rel)
         except StoreError as exc:
             logger.warning("Rejected file request %r: %s", action.rel, exc)
-            self._notify(_MISSING_FILE_MESSAGE)
+            self.notify(_MISSING_FILE_MESSAGE)
             return
 
         workdir = Path(tempfile.mkdtemp(prefix="private-sync-"))
+        sent = 0
         try:
             parts = pack_for_send(source, workdir, self._config.zip_password)
             for part in parts:
                 self._client.send_document(
                     self._config.chat_id, part, caption=part.name
                 )
+                sent += 1
+
             if len(parts) > 1:
                 archive = source.name + ".zip"
-                self._notify(_SPLIT_NOTICE % (len(parts), archive, archive))
+                self.notify(_SPLIT_NOTICE.format(count=len(parts), archive=archive))
             logger.info("Delivered %s as %d part(s)", action.rel, len(parts))
         except PackError as exc:
             logger.error("Packing failed for %s: %s", action.rel, exc)
-            self._notify("파일을 포장하는 중 오류가 발생했습니다.")
-        except TelegramError as exc:
-            logger.error("Sending failed for %s: %s", action.rel, exc)
-            self._notify("파일 전송에 실패했습니다. 다시 시도해 주세요.")
+            self.notify("파일을 포장하는 중 오류가 발생했습니다.")
+        except (TelegramError, OSError) as exc:
+            logger.error(
+                "Sending failed for %s after %d part(s): %s",
+                action.rel,
+                sent,
+                type(exc).__name__,
+            )
+            # 이미 보낸 파트가 있으면 재시도 시 같은 이름의 파트가 섞인다.
+            # 사용자가 앞의 것을 버리도록 명시해야 결합 명령이 어긋나지 않는다.
+            if sent:
+                self.notify(_PARTIAL_SEND_MESSAGE.format(sent=sent, total=len(parts)))
+            else:
+                self.notify("파일 전송에 실패했습니다. 다시 시도해 주세요.")
         finally:
             # 평문·암호문 임시 파일을 남기지 않는다
             shutil.rmtree(workdir, ignore_errors=True)
@@ -3420,20 +3513,19 @@ def _handle_one(update: dict, context: Context, deliverer: Deliverer) -> None:
     if incoming is None:
         return
 
+    # 전달까지 감싸야 docstring 의 약속이 실제로 지켜진다. 하위 모듈이
+    # 계약을 어기고 raw OSError 를 던져도 봇 프로세스는 살아 있어야 한다.
     try:
         action = handle(incoming, context)
+        deliverer.run(action, incoming)
     except StoreError as exc:
         logger.warning("Store error while handling input: %s", exc)
-        deliverer.run(SendText(text=_MISSING_FILE_MESSAGE), incoming)
-        return
+        deliverer.notify(_MISSING_FILE_MESSAGE)
     except (PrivateSyncError, OSError) as exc:
         # 깨진 심볼릭 링크 같은 예상 밖 오류로 봇 프로세스가 죽으면,
         # 사용자는 외부에서 자료를 꺼낼 수단을 통째로 잃는다.
         logger.error("Unexpected error handling input: %s", type(exc).__name__)
-        deliverer.run(SendText(text=_INTERNAL_ERROR_MESSAGE), incoming)
-        return
-
-    deliverer.run(action, incoming)
+        deliverer.notify(_INTERNAL_ERROR_MESSAGE)
 
 
 def _serve(client: TelegramClient, config: BotConfig) -> None:
@@ -3493,7 +3585,7 @@ if __name__ == "__main__":
 - [ ] **Step 4: 테스트 통과 확인**
 
 Run: `.venv/bin/pytest tests/test_bot_main.py -v`
-Expected: PASS (8 passed)
+Expected: PASS (11 passed)
 
 - [ ] **Step 5: 전체 테스트와 커밋**
 
@@ -3501,7 +3593,7 @@ Run:
 ```bash
 .venv/bin/ruff format src tests && .venv/bin/ruff check src tests && .venv/bin/pytest -q
 ```
-Expected: 93 passed
+Expected: 96 passed
 
 ```bash
 git add src/private_sync/bot/main.py tests/test_bot_main.py
@@ -3679,7 +3771,7 @@ Run:
 ```bash
 .venv/bin/ruff format src tests && .venv/bin/ruff check src tests && .venv/bin/pytest -q
 ```
-Expected: 93 passed
+Expected: 96 passed
 
 ```bash
 git add README.md deploy
