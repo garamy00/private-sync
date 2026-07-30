@@ -8,6 +8,7 @@ from private_sync.agent.main import (
     LoopState,
     SyncWorker,
     _EventHandler,
+    queue_initial_sync,
 )
 from private_sync.agent.pending import PendingItem, PendingStore
 from private_sync.agent.watcher import Debouncer, build_targets
@@ -86,6 +87,50 @@ def test_unknown_label_is_skipped(tmp_path):
     worker.drain()
 
     assert calls == []
+
+
+def test_initial_sync_queues_every_configured_target(tmp_path):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    quote = tmp_path / "견적서.xlsx"
+    quote.write_text("q", encoding="utf-8")
+    config = AgentConfig(
+        remote=REMOTE,
+        sources=(Source(label="문서", paths=(docs, quote), exclude=()),),
+    )
+    pending = PendingStore(tmp_path / "pending.json")
+    pending.load()
+    worker = SyncWorker(config, pending, uploader=lambda *_args: None)
+
+    queue_initial_sync(worker, build_targets(config.sources))
+
+    # 디렉토리와 개별 파일 모두, 변경 이벤트 없이 대기 목록에 들어가야 한다
+    assert set(pending.items()) == {
+        PendingItem(label="문서", path=str(docs)),
+        PendingItem(label="문서", path=str(quote)),
+    }
+
+
+def test_initial_sync_targets_are_uploaded_and_cleared(tmp_path):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    quote = tmp_path / "견적서.xlsx"
+    quote.write_text("q", encoding="utf-8")
+    config = AgentConfig(
+        remote=REMOTE,
+        sources=(Source(label="문서", paths=(docs, quote), exclude=()),),
+    )
+    pending = PendingStore(tmp_path / "pending.json")
+    pending.load()
+    calls = []
+    worker = SyncWorker(config, pending, uploader=lambda *args: calls.append(args))
+
+    queue_initial_sync(worker, build_targets(config.sources))
+    worker.drain()
+
+    uploaded_paths = {call[2] for call in calls}
+    assert uploaded_paths == {docs, quote}
+    assert pending.items() == []
 
 
 class _FakeEvent:

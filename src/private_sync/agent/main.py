@@ -156,6 +156,19 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def queue_initial_sync(worker: SyncWorker, targets: list[WatchTarget]) -> None:
+    """시작 시 모든 감시 대상을 한 번 큐에 넣는다.
+
+    watchdog은 데몬이 뜬 뒤의 변경만 알려준다. 아직 한 번도 올리지 않은 파일과
+    데몬이 꺼져 있는 동안 바뀐 파일은 이것이 없으면 영영 올라가지 않는다.
+    실제 차이 비교와 전송량 최소화는 rsync가 한다.
+    """
+    for target in targets:
+        worker.enqueue(target.label, target.path)
+
+    logger.info("Queued %d target(s) for initial sync", len(targets))
+
+
 def _run_loop(worker: SyncWorker, state: LoopState) -> None:
     """디바운스가 끝난 항목을 큐에 넣고 업로드를 시도한다."""
     while not state.stop.is_set():
@@ -205,6 +218,7 @@ def main(argv: list[str] | None = None) -> int:
 
     observer.start()
     logger.info("Agent started with %d watch targets", len(targets))
+    queue_initial_sync(worker, targets)
     try:
         _run_loop(worker, state)
     finally:
