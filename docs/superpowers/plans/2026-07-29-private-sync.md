@@ -1284,7 +1284,8 @@ git commit -m "feat: 감시 대상 매칭과 디바운스 추가"
 **Interfaces:**
 - Consumes: `load_agent_config`, `PendingItem`, `PendingStore`, `build_targets`, `match_target`, `Debouncer`, `upload`, `RetryableUploadError`, `UploadError`
 - Produces:
-  - `private_sync.agent.main`: `Backoff(base: float = 3.0, cap: float = 300.0)` with `delay() -> float`, `fail() -> None`, `reset() -> None`; `SyncWorker(config: AgentConfig, pending: PendingStore, uploader: UploadFn = upload)` with `enqueue(label: str, path: Path) -> None`, `drain() -> None`, `has_pending() -> bool`, 그리고 공개 속성 `backoff: Backoff`; `main(argv: list[str] | None = None) -> int`
+  - `private_sync.agent.main`: `Backoff(base: float = 3.0, cap: float = 300.0)` with `delay() -> float`, `fail() -> None`, `reset() -> None`; `SyncWorker(config: AgentConfig, pending: PendingStore, uploader: UploadFn = upload)` with `enqueue(label: str, path: Path) -> None`, `drain() -> None`, `has_pending() -> bool`, 그리고 공개 속성 `backoff: Backoff`; `LoopState(debouncer: Debouncer, lock: threading.Lock, stop: threading.Event)`; `main(argv: list[str] | None = None) -> int`
+  - `LoopState` 는 감시 스레드와 메인 루프가 공유하는 상태를 한 덩어리로 묶는다. 이것이 있어야 `_EventHandler.__init__` 과 `_run_loop` 이 파라미터 3개 이하 규칙을 지킨다.
   - `UploadFn` 은 `Callable[[RemoteConfig, str, Path, tuple[str, ...]], None]` 타입 별칭이다.
 
 - [ ] **Step 1: 실패하는 테스트 작성**
@@ -1292,10 +1293,19 @@ git commit -m "feat: 감시 대상 매칭과 디바운스 추가"
 `tests/test_agent_main.py`:
 
 ```python
+import threading
+import time
 from pathlib import Path
 
-from private_sync.agent.main import Backoff, SyncWorker
+from private_sync.agent.main import (
+    _DEBOUNCE_SEC,
+    Backoff,
+    LoopState,
+    SyncWorker,
+    _EventHandler,
+)
 from private_sync.agent.pending import PendingItem, PendingStore
+from private_sync.agent.watcher import Debouncer, build_targets
 from private_sync.config import AgentConfig, RemoteConfig, Source
 from private_sync.errors import RetryableUploadError, UploadError
 
@@ -1371,6 +1381,93 @@ def test_unknown_label_is_skipped(tmp_path):
     worker.drain()
 
     assert calls == []
+
+
+class _FakeEvent:
+    """watchdog FileSystemEvent 를 흉내내는 최소 객체."""
+
+    def __init__(self, src_path, event_type="modified", is_directory=False, dest_path=""):
+        self.src_path = src_path
+        self.event_type = event_type
+        self.is_directory = is_directory
+        self.dest_path = dest_path
+
+
+def _handler_state(source):
+    """이벤트 핸들러와 그것이 쓰는 공유 상태를 만든다."""
+    state = LoopState(
+        debouncer=Debouncer(_DEBOUNCE_SEC),
+        lock=threading.Lock(),
+        stop=threading.Event(),
+    )
+    return _EventHandler(build_targets((source,)), state), state
+
+
+def _released(state):
+    """디바운스 마감을 지나쳐 방출된 키 목록을 돌려준다."""
+    return state.debouncer.due(time.monotonic() + _DEBOUNCE_SEC + 1)
+
+
+def test_event_handler_queues_matching_file(tmp_path):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    changed = docs / "a.md"
+    changed.write_text("a", encoding="utf-8")
+    handler, state = _handler_state(Source(label="문서", paths=(docs,), exclude=()))
+
+    handler.on_any_event(_FakeEvent(str(changed)))
+
+    assert _released(state) == [("문서", str(docs))]
+
+
+def test_event_handler_ignores_directory_events(tmp_path):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    handler, state = _handler_state(Source(label="문서", paths=(docs,), exclude=()))
+
+    handler.on_any_event(_FakeEvent(str(docs / "sub"), is_directory=True))
+
+    assert _released(state) == []
+
+
+def test_event_handler_ignores_deleted_events(tmp_path):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    handler, state = _handler_state(Source(label="문서", paths=(docs,), exclude=()))
+
+    handler.on_any_event(_FakeEvent(str(docs / "a.md"), event_type="deleted"))
+
+    # 삭제는 서버로 전파하지 않는다
+    assert _released(state) == []
+
+
+def test_event_handler_follows_rename_destination(tmp_path):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    handler, state = _handler_state(Source(label="문서", paths=(docs,), exclude=()))
+
+    handler.on_any_event(
+        _FakeEvent(
+            str(tmp_path / "elsewhere.md"),
+            event_type="moved",
+            dest_path=str(docs / "a.md"),
+        )
+    )
+
+    # 새 내용은 목적지 경로에 있다
+    assert _released(state) == [("문서", str(docs))]
+
+
+def test_event_handler_ignores_excluded_file(tmp_path):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    handler, state = _handler_state(
+        Source(label="문서", paths=(docs,), exclude=(".DS_Store",))
+    )
+
+    handler.on_any_event(_FakeEvent(str(docs / ".DS_Store")))
+
+    assert _released(state) == []
 
 
 def test_backoff_grows_then_resets():
@@ -1504,13 +1601,21 @@ class SyncWorker:
         return bool(self._pending.items())
 
 
+@dataclass
+class LoopState:
+    """감시 스레드와 메인 루프가 공유하는 상태."""
+
+    debouncer: Debouncer
+    lock: threading.Lock
+    stop: threading.Event
+
+
 class _EventHandler(FileSystemEventHandler):
     """watchdog 이벤트를 디바운서에 넣는다."""
 
-    def __init__(self, targets, debouncer: Debouncer, lock: threading.Lock) -> None:
+    def __init__(self, targets: list[WatchTarget], state: LoopState) -> None:
         self._targets = targets
-        self._debouncer = debouncer
-        self._lock = lock
+        self._state = state
 
     def on_any_event(self, event: FileSystemEvent) -> None:
         if event.is_directory or event.event_type == "deleted":
@@ -1522,9 +1627,14 @@ class _EventHandler(FileSystemEventHandler):
         if target is None:
             return
 
-        with self._lock:
-            self._debouncer.touch((target.label, str(target.path)), time.monotonic())
+        with self._state.lock:
+            self._state.debouncer.touch(
+                (target.label, str(target.path)), time.monotonic()
+            )
 ```
+
+`dataclass` 와 `WatchTarget` 을 임포트에 추가한다: `from dataclasses import dataclass`,
+`from private_sync.agent.watcher import Debouncer, WatchTarget, build_targets, match_target`.
 
 `main()` 과 루프:
 
@@ -1537,16 +1647,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _run_loop(
-    worker: SyncWorker,
-    debouncer: Debouncer,
-    lock: threading.Lock,
-    stop: threading.Event,
-) -> None:
+def _run_loop(worker: SyncWorker, state: LoopState) -> None:
     """디바운스가 끝난 항목을 큐에 넣고 업로드를 시도한다."""
-    while not stop.is_set():
-        with lock:
-            ready = debouncer.due(time.monotonic())
+    while not state.stop.is_set():
+        with state.lock:
+            ready = state.debouncer.due(time.monotonic())
         for label, path in ready:
             worker.enqueue(label, Path(path))
 
@@ -1554,7 +1659,7 @@ def _run_loop(
 
         # 대기 항목이 남았다면 오프라인이므로 backoff만큼 쉬고 다시 시도한다
         wait_sec = worker.backoff.delay() if worker.has_pending() else _TICK_SEC
-        stop.wait(wait_sec)
+        state.stop.wait(wait_sec)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1575,22 +1680,24 @@ def main(argv: list[str] | None = None) -> int:
     pending.load()
     worker = SyncWorker(config, pending)
     targets = build_targets(config.sources)
-    debouncer = Debouncer(_DEBOUNCE_SEC)
-    lock = threading.Lock()
-    stop = threading.Event()
+    state = LoopState(
+        debouncer=Debouncer(_DEBOUNCE_SEC),
+        lock=threading.Lock(),
+        stop=threading.Event(),
+    )
 
     observer = Observer()
-    handler = _EventHandler(targets, debouncer, lock)
-    for watch_dir in {(t.watch_dir, t.recursive) for t in targets}:
-        observer.schedule(handler, str(watch_dir[0]), recursive=watch_dir[1])
+    handler = _EventHandler(targets, state)
+    for watch_dir, recursive in {(t.watch_dir, t.recursive) for t in targets}:
+        observer.schedule(handler, str(watch_dir), recursive=recursive)
 
-    signal.signal(signal.SIGTERM, lambda *_: stop.set())
-    signal.signal(signal.SIGINT, lambda *_: stop.set())
+    signal.signal(signal.SIGTERM, lambda *_: state.stop.set())
+    signal.signal(signal.SIGINT, lambda *_: state.stop.set())
 
     observer.start()
     logger.info("Agent started with %d watch targets", len(targets))
     try:
-        _run_loop(worker, debouncer, lock, stop)
+        _run_loop(worker, state)
     finally:
         observer.stop()
         observer.join(timeout=5)
@@ -1605,7 +1712,7 @@ if __name__ == "__main__":
 - [ ] **Step 4: 테스트 통과 확인**
 
 Run: `.venv/bin/pytest tests/test_agent_main.py -v`
-Expected: PASS (5 passed)
+Expected: PASS (10 passed)
 
 - [ ] **Step 5: 전체 테스트와 커밋**
 
@@ -3160,7 +3267,7 @@ Run:
 ```bash
 .venv/bin/ruff format src tests && .venv/bin/ruff check src tests && .venv/bin/pytest -q
 ```
-Expected: 77 passed
+Expected: 82 passed
 
 ```bash
 git add src/private_sync/bot/main.py tests/test_bot_main.py
@@ -3338,7 +3445,7 @@ Run:
 ```bash
 .venv/bin/ruff format src tests && .venv/bin/ruff check src tests && .venv/bin/pytest -q
 ```
-Expected: 77 passed
+Expected: 82 passed
 
 ```bash
 git add README.md deploy
