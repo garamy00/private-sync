@@ -1,4 +1,4 @@
-import os
+from pathlib import Path
 
 import pytest
 import pyzipper
@@ -97,20 +97,17 @@ def test_pack_for_send_rejects_missing_source(tmp_path):
         pack_for_send(tmp_path / "없음.txt", dest, password="pw")
 
 
-def test_split_file_wraps_os_errors_in_pack_error(tmp_path):
-    if os.geteuid() == 0:
-        pytest.skip("root ignores directory permissions")
-
-    locked = tmp_path / "locked"
-    locked.mkdir()
-    target = locked / "big.zip"
+def test_split_file_wraps_unlink_failure_in_pack_error(tmp_path, monkeypatch):
+    target = tmp_path / "big.zip"
     target.write_bytes(b"x" * 100)
-    # 쓰기 금지 디렉토리에서는 파트 생성도 원본 삭제도 실패한다.
-    # 어느 쪽이든 raw OSError가 호출자에게 새어나가면 안 된다.
-    locked.chmod(0o555)
 
-    try:
-        with pytest.raises(PackError, match="cannot split"):
-            split_file(target, max_bytes=50)
-    finally:
-        locked.chmod(0o755)
+    def failing_unlink(self, missing_ok=False):
+        raise PermissionError(13, "Permission denied")
+
+    # 파트는 정상적으로 쓰이고 원본 삭제만 실패하는 상황을 만든다.
+    # 디렉토리 권한으로는 파트 쓰기가 먼저 막혀 이 분기에 도달하지 못한다.
+    monkeypatch.setattr(Path, "unlink", failing_unlink)
+
+    # 삭제 실패가 raw OSError로 새면 봇 프로세스가 죽는다
+    with pytest.raises(PackError, match="cannot split"):
+        split_file(target, max_bytes=50)
