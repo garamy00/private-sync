@@ -165,6 +165,10 @@ def _find(keyword: str, ctx: Context) -> SendText:
 def _handle_message(incoming: Incoming, ctx: Context) -> Action:
     """텍스트 명령을 처리한다."""
     parts = incoming.text.strip().split(maxsplit=1)
+    if not parts:
+        # 공백만 있는 메시지도 텔레그램에서는 유효한 text 로 도착한다
+        return SendText(text=_USAGE)
+
     command = parts[0].lower()
     argument = parts[1].strip() if len(parts) > 1 else ""
 

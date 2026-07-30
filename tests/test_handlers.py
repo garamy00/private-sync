@@ -56,6 +56,14 @@ def test_unknown_command_returns_usage():
     assert action.buttons == ()
 
 
+def test_whitespace_only_message_returns_usage():
+    # 공백만 보낸 메시지로 봇이 죽으면 안 된다
+    action = handle(_message("   "), _ctx())
+
+    assert isinstance(action, SendText)
+    assert "/start" in action.text
+
+
 def test_directory_button_lists_children_with_up_button():
     ctx = _ctx()
     start = handle(_message("/start"), ctx)
