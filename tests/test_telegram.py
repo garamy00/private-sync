@@ -1,4 +1,5 @@
 import json
+import logging
 
 import pytest
 import requests
@@ -95,6 +96,24 @@ def test_http_error_raises_telegram_error():
 
     with pytest.raises(TelegramError, match="403"):
         client.send_message("123", "hi")
+
+
+def test_logging_the_exception_chain_does_not_leak_token(caplog):
+    session = _FakeSession(
+        exc=requests.ConnectionError(
+            "HTTPSConnectionPool(host='api.telegram.org'): /botSECRET/sendMessage refused"
+        )
+    )
+    client = TelegramClient("SECRET", session=session)
+
+    with caplog.at_level(logging.ERROR):
+        try:
+            client.send_message("123", "hi")
+        except TelegramError:
+            # CLAUDE.md 가 권하는 방식. 체인이 붙어 있으면 여기서 토큰이 샌다.
+            logging.getLogger("probe").exception("send failed")
+
+    assert "SECRET" not in caplog.text
 
 
 def test_send_document_opens_file_and_posts(tmp_path):

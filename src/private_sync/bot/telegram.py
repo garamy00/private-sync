@@ -7,21 +7,60 @@ python-telegram-bot 을 쓰지 않고 raw HTTP만 사용한다. 서버가 아웃
 from __future__ import annotations
 
 import json
-import logging
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 import requests
 
 from private_sync.errors import TelegramError
 
-logger = logging.getLogger(__name__)
-
 # getUpdates 롱폴링 대기(초). 이 값만큼 봇 응답이 늦어질 수 있다.
 LONG_POLL_SEC = 20
 
-_API = "https://api.telegram.org/bot{}/{}"
+_API = "https://api.telegram.org/bot{token}/{method}"
 _POST_TIMEOUT_SEC = 30
 _UPLOAD_TIMEOUT_SEC = 300
+
+
+class _Response(Protocol):
+    """requests.Response 중 이 모듈이 쓰는 부분.
+
+    테스트가 가짜 세션을 주입할 수 있도록 최소 표면만 선언한다.
+    """
+
+    ok: bool
+    status_code: int
+
+    def json(self) -> object: ...
+
+
+@dataclass(frozen=True)
+class _PostBody:
+    """POST 요청 본문과 첨부."""
+
+    data: dict[str, object]
+    files: dict | None = None
+    timeout: int = _POST_TIMEOUT_SEC
+
+
+def _decode(method: str, response: _Response) -> dict:
+    """응답을 검증하고 JSON 본문을 반환한다.
+
+    Raises:
+        TelegramError: 비정상 상태 코드, 비-JSON 본문, 예상 밖 페이로드.
+    """
+    if not response.ok:
+        raise TelegramError(f"{method} returned status {response.status_code}")
+
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise TelegramError(f"{method} returned non-JSON body") from exc
+
+    if not isinstance(payload, dict):
+        raise TelegramError(f"{method} returned unexpected payload")
+    return payload
 
 
 def build_keyboard(buttons: tuple[tuple[str, str], ...]) -> str | None:
@@ -40,7 +79,8 @@ class TelegramClient:
         self._session = session or requests.Session()
 
     def _url(self, method: str) -> str:
-        return _API.format(self._token, method)
+        """메서드 호출 URL을 만든다. 이 문자열은 어떤 예외·로그에도 넣지 않는다."""
+        return _API.format(token=self._token, method=method)
 
     def get_updates(self, offset: int | None) -> list[dict]:
         """롱폴링으로 새 update 목록을 가져온다.
@@ -52,9 +92,7 @@ class TelegramClient:
         if offset is not None:
             params["offset"] = offset
 
-        response = self._request(
-            "get", "getUpdates", params=params, timeout=LONG_POLL_SEC + 10
-        )
+        response = self._get("getUpdates", params, LONG_POLL_SEC + 10)
         result = response.get("result")
         if not isinstance(result, list):
             raise TelegramError("getUpdates returned unexpected payload")
@@ -68,7 +106,7 @@ class TelegramClient:
         keyboard = build_keyboard(buttons)
         if keyboard:
             data["reply_markup"] = keyboard
-        self._request("post", "sendMessage", data=data, timeout=_POST_TIMEOUT_SEC)
+        self._post("sendMessage", _PostBody(data=data))
 
     def edit_message_text(
         self,
@@ -86,7 +124,7 @@ class TelegramClient:
         keyboard = build_keyboard(buttons)
         if keyboard:
             data["reply_markup"] = keyboard
-        self._request("post", "editMessageText", data=data, timeout=_POST_TIMEOUT_SEC)
+        self._post("editMessageText", _PostBody(data=data))
 
     def send_document(self, chat_id: str, path: Path, caption: str = "") -> None:
         """파일을 문서로 보낸다.
@@ -96,61 +134,55 @@ class TelegramClient:
         """
         try:
             with path.open("rb") as handle:
-                self._request(
-                    "post",
+                self._post(
                     "sendDocument",
-                    data={"chat_id": chat_id, "caption": caption},
-                    files={"document": (path.name, handle)},
-                    timeout=_UPLOAD_TIMEOUT_SEC,
+                    _PostBody(
+                        data={"chat_id": chat_id, "caption": caption},
+                        files={"document": (path.name, handle)},
+                        timeout=_UPLOAD_TIMEOUT_SEC,
+                    ),
                 )
         except OSError as exc:
+            # OSError 에는 토큰이 없으므로 체인을 유지해 디버깅 정보를 남긴다
             raise TelegramError(
                 f"cannot read document {path.name}: {exc.strerror}"
             ) from exc
 
     def answer_callback(self, callback_id: str) -> None:
         """버튼 탭의 로딩 표시를 해제한다."""
-        self._request(
-            "post",
-            "answerCallbackQuery",
-            data={"callback_query_id": callback_id},
-            timeout=_POST_TIMEOUT_SEC,
+        self._post(
+            "answerCallbackQuery", _PostBody(data={"callback_query_id": callback_id})
         )
 
-    def _request(
-        self,
-        verb: str,
-        method: str,
-        params: dict | None = None,
-        data: dict | None = None,
-        files: dict | None = None,
-        timeout: int = _POST_TIMEOUT_SEC,
-    ) -> dict:
-        """API를 호출하고 JSON 본문을 반환한다.
-
-        예외 메시지에는 URL을 넣지 않는다. URL에 봇 토큰이 들어 있다.
-        """
-        url = self._url(method)
+    def _get(self, method: str, params: dict, timeout: int) -> dict:
+        """GET 요청을 보내고 JSON 본문을 반환한다."""
         try:
-            if verb == "get":
-                response = self._session.get(url, params=params, timeout=timeout)
-            else:
-                response = self._session.post(
-                    url, data=data, files=files, timeout=timeout
-                )
+            response = self._session.get(
+                self._url(method), params=params, timeout=timeout
+            )
         except requests.RequestException as exc:
+            # `from None` 으로 체인을 끊는다. requests 예외 메시지에는 요청
+            # URL 이 담기고 그 URL 에는 봇 토큰이 들어 있어, 체인이 붙어 있으면
+            # logger.exception 이나 미처리 트레이스백으로 토큰이 새어나간다.
             raise TelegramError(
                 f"{method} request failed: {type(exc).__name__}"
-            ) from exc
+            ) from None
 
-        if not response.ok:
-            raise TelegramError(f"{method} returned status {response.status_code}")
+        return _decode(method, response)
 
+    def _post(self, method: str, body: _PostBody) -> dict:
+        """POST 요청을 보내고 JSON 본문을 반환한다."""
         try:
-            payload = response.json()
-        except ValueError as exc:
-            raise TelegramError(f"{method} returned non-JSON body") from exc
+            response = self._session.post(
+                self._url(method),
+                data=body.data,
+                files=body.files,
+                timeout=body.timeout,
+            )
+        except requests.RequestException as exc:
+            # 체인을 끊는 이유는 _get 과 같다 (토큰이 담긴 URL 노출 방지)
+            raise TelegramError(
+                f"{method} request failed: {type(exc).__name__}"
+            ) from None
 
-        if not isinstance(payload, dict):
-            raise TelegramError(f"{method} returned unexpected payload")
-        return payload
+        return _decode(method, response)
