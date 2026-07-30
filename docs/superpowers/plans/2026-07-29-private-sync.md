@@ -3805,22 +3805,19 @@ ssh dgson@ai 'cat ~/private-sync/store/테스트/ps-test/a.txt'
 ```
 Expected: `hello` 와 `world` 두 줄
 
-- [ ] **Step 6: 서버에서 봇 검증**
+- [ ] **Step 6: 봇 검증 절차를 README에 기록 (사용자 실행 구간)**
 
-서버에 코드를 배치하고 환경변수를 설정한 뒤 봇을 포그라운드로 띄운다.
+봇 검증에는 실제 텔레그램 봇 토큰과 chat_id가 필요하므로 구현자가 대신 수행할 수 없다.
+README의 "서버 설정" 절에 아래 절차를 그대로 옮겨 적어 사용자가 순서대로 따라갈 수 있게 한다.
 
-```bash
-ssh dgson@ai
-cd ~/private-sync
-set -a && . ~/.config/private-sync/bot.env && set +a
-.venv/bin/private-sync-bot --config ~/.config/private-sync/bot.yaml --debug
-```
-
-폰에서 순서대로 확인한다.
-1. `/start` → `📁 테스트` 버튼이 보인다
-2. 버튼을 타고 들어가 `📄 a.txt (12 B)` 를 탭한다
-3. `a.txt.zip` 이 도착하고, 압축 앱에서 ZIP 암호를 넣으면 두 줄이 보인다
-4. `/find a.txt` → 같은 파일이 검색된다
+1. 텔레그램에서 `@BotFather`로 봇을 만들고 토큰을 받는다.
+2. 만든 봇에게 아무 메시지나 보낸 뒤 chat_id를 확인한다:
+   `curl -s "https://api.telegram.org/bot<TOKEN>/getUpdates" | grep -o '"id":[0-9-]*'`
+3. 서버에 `~/.config/private-sync/bot.env`를 `chmod 600`으로 만들고 토큰·chat_id·ZIP 암호를 넣는다.
+4. 봇을 포그라운드로 띄운다:
+   `set -a && . ~/.config/private-sync/bot.env && set +a && .venv/bin/private-sync-bot --config ~/.config/private-sync/bot.yaml --debug`
+5. 폰에서 확인한다: `/start`로 라벨 버튼이 보이는지 → 폴더를 타고 들어가 파일을 탭 →
+   도착한 `.zip`을 압축 앱에서 비밀번호로 여는지 → `/find <키워드>`로 검색되는지.
 
 - [ ] **Step 7: systemd 가용성 확인과 정리**
 
@@ -3831,10 +3828,11 @@ systemctl --user status 2>&1 | head -3
 `Failed to connect to bus` 가 나오면 README의 crontab 방식을 쓴다. 결과를 README의
 "서버 설정" 절에 한 줄로 기록한다.
 
-정리:
+정리 (Step 5에서 만든 임시 소스와 서버 저장소의 테스트 라벨을 지운다):
 ```bash
-rm -rf /tmp/ps-test /tmp/ps-agent.yaml
-ssh dgson@ai 'rm -rf ~/private-sync/store/테스트'
+rm -r /tmp/ps-test
+rm /tmp/ps-agent.yaml
+ssh dgson@ai 'rm -r ~/private-sync/store/테스트'
 ```
 
 README에 변경이 생겼으면 커밋한다.
