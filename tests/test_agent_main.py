@@ -1,3 +1,4 @@
+import logging
 import threading
 import time
 from pathlib import Path
@@ -239,18 +240,24 @@ def test_replace_config_applies_the_new_label(tmp_path):
     assert [args[1] for args in calls] == ["이후"]
 
 
-def test_replace_config_drops_items_of_removed_labels(tmp_path):
+def test_replace_config_drops_items_of_removed_labels(tmp_path, caplog):
     doc = tmp_path / "a.md"
     doc.write_text("a", encoding="utf-8")
     pending = PendingStore(tmp_path / "pending.json")
     pending.load()
-    worker = SyncWorker(_config(doc, label="이전"), pending, uploader=lambda *_a: None)
+    calls = []
+    worker = SyncWorker(
+        _config(doc, label="이전"), pending, uploader=lambda *args: calls.append(args)
+    )
     worker.enqueue("이전", doc)
 
     worker.replace_config(_config(doc, label="이후"))
-    worker.drain()
+    with caplog.at_level(logging.WARNING):
+        worker.drain()
 
-    # 설정에서 사라진 라벨의 대기 항목은 폐기된다
+    # 빈 목록만 보면 정상 업로드와 구분되지 않는다. 올리지 않고 버렸는지를 본다.
+    assert calls == []
+    assert "unknown label 이전" in caplog.text
     assert pending.items() == []
 
 
