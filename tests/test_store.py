@@ -122,8 +122,25 @@ def test_sibling_directory_sharing_name_prefix_is_rejected(store):
 
 
 def test_search_does_not_report_truncation_when_results_fit(store, caplog):
+    # 마지막 순회 항목이 '비일치'여야 오탐 분기를 실제로 밟는다.
+    # 정렬상 zz_other.txt 는 두 일치 항목 뒤, 한글 이름 앞에 온다.
+    (store / "메모" / "aa_match.txt").write_text("1", encoding="utf-8")
+    (store / "메모" / "ab_match.txt").write_text("2", encoding="utf-8")
+    (store / "메모" / "zz_other.txt").write_text("3", encoding="utf-8")
+
     with caplog.at_level(logging.INFO):
-        results = search(store, "계약", limit=2)
+        results = search(store, "match", limit=2)
 
     assert len(results) == 2
     assert "truncated" not in caplog.text
+
+
+def test_search_reports_truncation_when_matches_exceed_limit(store, caplog):
+    for index in range(4):
+        (store / "메모" / f"bulk{index}.txt").write_text("b", encoding="utf-8")
+
+    with caplog.at_level(logging.INFO):
+        results = search(store, "bulk", limit=2)
+
+    assert len(results) == 2
+    assert "truncated" in caplog.text
