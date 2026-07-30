@@ -1,7 +1,16 @@
+import threading
+import time
 from pathlib import Path
 
-from private_sync.agent.main import Backoff, SyncWorker
+from private_sync.agent.main import (
+    _DEBOUNCE_SEC,
+    Backoff,
+    LoopState,
+    SyncWorker,
+    _EventHandler,
+)
 from private_sync.agent.pending import PendingItem, PendingStore
+from private_sync.agent.watcher import Debouncer, build_targets
 from private_sync.config import AgentConfig, RemoteConfig, Source
 from private_sync.errors import RetryableUploadError, UploadError
 
@@ -77,6 +86,95 @@ def test_unknown_label_is_skipped(tmp_path):
     worker.drain()
 
     assert calls == []
+
+
+class _FakeEvent:
+    """watchdog FileSystemEvent 를 흉내내는 최소 객체."""
+
+    def __init__(
+        self, src_path, event_type="modified", is_directory=False, dest_path=""
+    ):
+        self.src_path = src_path
+        self.event_type = event_type
+        self.is_directory = is_directory
+        self.dest_path = dest_path
+
+
+def _handler_state(source):
+    """이벤트 핸들러와 그것이 쓰는 공유 상태를 만든다."""
+    state = LoopState(
+        debouncer=Debouncer(_DEBOUNCE_SEC),
+        lock=threading.Lock(),
+        stop=threading.Event(),
+    )
+    return _EventHandler(build_targets((source,)), state), state
+
+
+def _released(state):
+    """디바운스 마감을 지나쳐 방출된 키 목록을 돌려준다."""
+    return state.debouncer.due(time.monotonic() + _DEBOUNCE_SEC + 1)
+
+
+def test_event_handler_queues_matching_file(tmp_path):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    changed = docs / "a.md"
+    changed.write_text("a", encoding="utf-8")
+    handler, state = _handler_state(Source(label="문서", paths=(docs,), exclude=()))
+
+    handler.on_any_event(_FakeEvent(str(changed)))
+
+    assert _released(state) == [("문서", str(docs))]
+
+
+def test_event_handler_ignores_directory_events(tmp_path):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    handler, state = _handler_state(Source(label="문서", paths=(docs,), exclude=()))
+
+    handler.on_any_event(_FakeEvent(str(docs / "sub"), is_directory=True))
+
+    assert _released(state) == []
+
+
+def test_event_handler_ignores_deleted_events(tmp_path):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    handler, state = _handler_state(Source(label="문서", paths=(docs,), exclude=()))
+
+    handler.on_any_event(_FakeEvent(str(docs / "a.md"), event_type="deleted"))
+
+    # 삭제는 서버로 전파하지 않는다
+    assert _released(state) == []
+
+
+def test_event_handler_follows_rename_destination(tmp_path):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    handler, state = _handler_state(Source(label="문서", paths=(docs,), exclude=()))
+
+    handler.on_any_event(
+        _FakeEvent(
+            str(tmp_path / "elsewhere.md"),
+            event_type="moved",
+            dest_path=str(docs / "a.md"),
+        )
+    )
+
+    # 새 내용은 목적지 경로에 있다
+    assert _released(state) == [("문서", str(docs))]
+
+
+def test_event_handler_ignores_excluded_file(tmp_path):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    handler, state = _handler_state(
+        Source(label="문서", paths=(docs,), exclude=(".DS_Store",))
+    )
+
+    handler.on_any_event(_FakeEvent(str(docs / ".DS_Store")))
+
+    assert _released(state) == []
 
 
 def test_backoff_grows_then_resets():

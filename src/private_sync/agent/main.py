@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
@@ -16,7 +17,12 @@ from watchdog.observers import Observer
 
 from private_sync.agent.pending import PendingItem, PendingStore
 from private_sync.agent.uploader import upload
-from private_sync.agent.watcher import Debouncer, build_targets, match_target
+from private_sync.agent.watcher import (
+    Debouncer,
+    WatchTarget,
+    build_targets,
+    match_target,
+)
 from private_sync.config import AgentConfig, RemoteConfig, load_agent_config
 from private_sync.errors import ConfigError, RetryableUploadError, UploadError
 
@@ -105,13 +111,21 @@ class SyncWorker:
         return bool(self._pending.items())
 
 
+@dataclass
+class LoopState:
+    """감시 스레드와 메인 루프가 공유하는 상태."""
+
+    debouncer: Debouncer
+    lock: threading.Lock
+    stop: threading.Event
+
+
 class _EventHandler(FileSystemEventHandler):
     """watchdog 이벤트를 디바운서에 넣는다."""
 
-    def __init__(self, targets, debouncer: Debouncer, lock: threading.Lock) -> None:
+    def __init__(self, targets: list[WatchTarget], state: LoopState) -> None:
         self._targets = targets
-        self._debouncer = debouncer
-        self._lock = lock
+        self._state = state
 
     def on_any_event(self, event: FileSystemEvent) -> None:
         if event.is_directory or event.event_type == "deleted":
@@ -123,8 +137,10 @@ class _EventHandler(FileSystemEventHandler):
         if target is None:
             return
 
-        with self._lock:
-            self._debouncer.touch((target.label, str(target.path)), time.monotonic())
+        with self._state.lock:
+            self._state.debouncer.touch(
+                (target.label, str(target.path)), time.monotonic()
+            )
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -135,16 +151,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _run_loop(
-    worker: SyncWorker,
-    debouncer: Debouncer,
-    lock: threading.Lock,
-    stop: threading.Event,
-) -> None:
+def _run_loop(worker: SyncWorker, state: LoopState) -> None:
     """디바운스가 끝난 항목을 큐에 넣고 업로드를 시도한다."""
-    while not stop.is_set():
-        with lock:
-            ready = debouncer.due(time.monotonic())
+    while not state.stop.is_set():
+        with state.lock:
+            ready = state.debouncer.due(time.monotonic())
         for label, path in ready:
             worker.enqueue(label, Path(path))
 
@@ -152,7 +163,7 @@ def _run_loop(
 
         # 대기 항목이 남았다면 오프라인이므로 backoff만큼 쉬고 다시 시도한다
         wait_sec = worker.backoff.delay() if worker.has_pending() else _TICK_SEC
-        stop.wait(wait_sec)
+        state.stop.wait(wait_sec)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -173,22 +184,24 @@ def main(argv: list[str] | None = None) -> int:
     pending.load()
     worker = SyncWorker(config, pending)
     targets = build_targets(config.sources)
-    debouncer = Debouncer(_DEBOUNCE_SEC)
-    lock = threading.Lock()
-    stop = threading.Event()
+    state = LoopState(
+        debouncer=Debouncer(_DEBOUNCE_SEC),
+        lock=threading.Lock(),
+        stop=threading.Event(),
+    )
 
     observer = Observer()
-    handler = _EventHandler(targets, debouncer, lock)
-    for watch_dir in {(t.watch_dir, t.recursive) for t in targets}:
-        observer.schedule(handler, str(watch_dir[0]), recursive=watch_dir[1])
+    handler = _EventHandler(targets, state)
+    for watch_dir, recursive in {(t.watch_dir, t.recursive) for t in targets}:
+        observer.schedule(handler, str(watch_dir), recursive=recursive)
 
-    signal.signal(signal.SIGTERM, lambda *_: stop.set())
-    signal.signal(signal.SIGINT, lambda *_: stop.set())
+    signal.signal(signal.SIGTERM, lambda *_: state.stop.set())
+    signal.signal(signal.SIGINT, lambda *_: state.stop.set())
 
     observer.start()
     logger.info("Agent started with %d watch targets", len(targets))
     try:
-        _run_loop(worker, debouncer, lock, stop)
+        _run_loop(worker, state)
     finally:
         observer.stop()
         observer.join(timeout=5)
