@@ -21,6 +21,15 @@ class Entry:
     size: int
 
 
+def _is_inside(base: Path, candidate: Path) -> bool:
+    """이미 resolve된 후보 경로가 저장소 루트 안(또는 루트 자신)인지 판단한다.
+
+    문자열 접두사 비교는 `store-evil` 같은 형제 디렉토리에 뚫리므로 `parents`
+    멤버십으로 확인한다.
+    """
+    return candidate == base or base in candidate.parents
+
+
 def resolve_safe(root: Path, rel: str) -> Path:
     """상대경로를 저장소 루트 안의 실제 경로로 바꾼다.
 
@@ -33,7 +42,7 @@ def resolve_safe(root: Path, rel: str) -> Path:
     base = root.resolve()
     candidate = (base / rel).resolve()
 
-    if candidate != base and base not in candidate.parents:
+    if not _is_inside(base, candidate):
         raise StoreError(f"path {rel!r} resolves outside the store")
     if not candidate.exists():
         raise StoreError(f"path {rel!r} not found in store")
@@ -46,11 +55,17 @@ def list_dir(root: Path, rel: str) -> list[Entry]:
     Raises:
         StoreError: 경로가 루트를 벗어나거나 디렉토리가 아닐 때.
     """
+    base = root.resolve()
     target = resolve_safe(root, rel)
     if not target.is_dir():
         raise StoreError(f"path {rel!r} is not a directory")
 
-    entries = [_to_entry(child, rel) for child in target.iterdir()]
+    # 저장소 밖을 가리키는 심볼릭 링크는 이름·크기조차 노출하지 않는다
+    entries = [
+        _to_entry(child, rel)
+        for child in target.iterdir()
+        if _is_inside(base, child.resolve())
+    ]
     return sorted(entries, key=lambda e: (not e.is_dir, e.name))
 
 
@@ -62,16 +77,25 @@ def search(root: Path, keyword: str, limit: int = 50) -> list[Entry]:
 
     base = root.resolve()
     results: list[Entry] = []
+    truncated = False
     for path in sorted(base.rglob("*")):
-        if len(results) >= limit:
-            logger.info("Search for %r truncated at %d results", keyword, limit)
-            break
         if not path.is_file() or needle not in path.name.lower():
             continue
+        if not _is_inside(base, path.resolve()):
+            continue
+
+        # 한도를 넘는 '실제 일치'를 만났을 때만 절단으로 기록한다
+        if len(results) >= limit:
+            truncated = True
+            break
+
         rel = str(PurePosixPath(path.relative_to(base)))
         results.append(
             Entry(name=path.name, rel=rel, is_dir=False, size=path.stat().st_size)
         )
+
+    if truncated:
+        logger.info("Search for %r truncated at %d results", keyword, limit)
     return results
 
 

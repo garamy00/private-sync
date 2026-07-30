@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 
 from private_sync.bot.store import (
@@ -84,3 +86,44 @@ def test_parent_rel_walks_up_to_root():
     assert parent_rel("SKT 문서/sub") == "SKT 문서"
     assert parent_rel("SKT 문서") == ""
     assert parent_rel("") is None
+
+
+def test_list_dir_rejects_non_directory(store):
+    with pytest.raises(StoreError, match="not a directory"):
+        list_dir(store, "SKT 문서/계약서.docx")
+
+
+def test_symlink_escaping_store_is_hidden_and_unreadable(store, tmp_path):
+    outside = tmp_path / "outside.txt"
+    outside.write_text("SECRET", encoding="utf-8")
+    (store / "메모" / "link.txt").symlink_to(outside)
+
+    # 내용은 물론 이름·크기조차 노출되지 않아야 한다
+    assert "link.txt" not in [e.name for e in list_dir(store, "메모")]
+    assert search(store, "link") == []
+    with pytest.raises(StoreError, match="outside the store"):
+        resolve_safe(store, "메모/link.txt")
+
+
+def test_symlink_inside_store_stays_visible(store):
+    (store / "메모" / "바로가기.docx").symlink_to(store / "SKT 문서" / "계약서.docx")
+
+    assert "바로가기.docx" in [e.name for e in list_dir(store, "메모")]
+
+
+def test_sibling_directory_sharing_name_prefix_is_rejected(store):
+    evil = store.parent / (store.name + "-evil")
+    evil.mkdir()
+    (evil / "leak.txt").write_text("x", encoding="utf-8")
+
+    # 문자열 접두사 비교였다면 통과했을 경로다
+    with pytest.raises(StoreError, match="outside the store"):
+        resolve_safe(store, f"../{evil.name}/leak.txt")
+
+
+def test_search_does_not_report_truncation_when_results_fit(store, caplog):
+    with caplog.at_level(logging.INFO):
+        results = search(store, "계약", limit=2)
+
+    assert len(results) == 2
+    assert "truncated" not in caplog.text
