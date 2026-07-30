@@ -21,7 +21,7 @@ from private_sync.agent.watcher import Debouncer, build_targets
 from private_sync.config import AgentConfig, RemoteConfig, Source, load_agent_config
 from private_sync.errors import RetryableUploadError, UploadError
 
-REMOTE = RemoteConfig(host="dgson@ai", store="store")
+REMOTE = RemoteConfig(host="dgson@nonexistent.invalid", store="store")
 
 
 def _config(path: Path, label: str = "문서") -> AgentConfig:
@@ -312,10 +312,10 @@ class _FakeObserver:
         self.calls.append(("schedule", path, recursive))
 
 
-def _yaml(label, path):
+def _yaml(label, path, host="dgson@nonexistent.invalid"):
     return f"""
 remote:
-  host: dgson@ai
+  host: {host}
   store: store
 sources:
   - label: {label}
@@ -324,7 +324,7 @@ sources:
 """
 
 
-def _runtime(tmp_path, label, watched):
+def _runtime(tmp_path, label, watched, uploader=None):
     """리로드를 시험할 최소 런타임과 루프 상태를 만든다."""
     config_path = tmp_path / "agent.yaml"
     config_path.write_text(_yaml(label, watched), encoding="utf-8")
@@ -338,12 +338,13 @@ def _runtime(tmp_path, label, watched):
         stop=threading.Event(),
     )
     runtime = AgentRuntime(
-        worker=SyncWorker(config, pending, uploader=lambda *_a: None),
+        worker=SyncWorker(config, pending, uploader=uploader or (lambda *_a: None)),
         handler=_EventHandler(targets, state),
         observer=_FakeObserver(),
         config_path=config_path,
         targets=targets,
         watcher=ConfigWatcher(config_path),
+        config=config,
     )
     return runtime, pending, state
 
@@ -359,6 +360,59 @@ def test_reload_applies_the_new_label(tmp_path):
     assert [t.label for t in runtime.targets] == ["이후"]
 
 
+def test_reload_applies_new_config_to_worker_and_handler(tmp_path):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+    changed = other / "a.md"
+    changed.write_text("a", encoding="utf-8")
+    calls = []
+    runtime, _pending, state = _runtime(
+        tmp_path, "이전", docs, uploader=lambda *args: calls.append(args)
+    )
+    runtime.config_path.write_text(_yaml("이후", other), encoding="utf-8")
+
+    _reload_config(runtime)
+
+    # 핸들러가 새 대상으로 매칭하는가 (replace_targets 가 실제로 불렸는가)
+    runtime.handler.on_any_event(_FakeEvent(str(changed)))
+    assert _released(state) == [("이후", str(other))]
+
+    # 워커가 새 라벨을 아는가 (replace_config 가 실제로 불렸는가)
+    runtime.worker.drain()
+    assert [args[1] for args in calls] == ["이후"]
+
+
+def test_remote_change_requeues_every_target(tmp_path):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    runtime, pending, _state = _runtime(tmp_path, "문서", docs)
+    runtime.config_path.write_text(
+        _yaml("문서", docs, host="dgson@other.invalid"), encoding="utf-8"
+    )
+
+    _reload_config(runtime)
+
+    # 대상은 그대로지만 서버가 바뀌었으니 다시 올려야 한다
+    assert pending.items() == [PendingItem(label="문서", path=str(docs))]
+
+
+def test_unchanged_label_is_not_warned_about(tmp_path, caplog):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+    runtime, _pending, _state = _runtime(tmp_path, "문서", docs)
+    runtime.config_path.write_text(_yaml("문서", other), encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING):
+        _reload_config(runtime)
+
+    # 매번 경고하면 진짜 경고를 놓치게 된다
+    assert "left the config" not in caplog.text
+
+
 def test_reload_queues_only_newly_added_targets(tmp_path):
     docs = tmp_path / "docs"
     docs.mkdir()
@@ -368,7 +422,7 @@ def test_reload_queues_only_newly_added_targets(tmp_path):
     runtime.config_path.write_text(
         f"""
 remote:
-  host: dgson@ai
+  host: dgson@nonexistent.invalid
   store: store
 sources:
   - label: 문서
@@ -444,9 +498,13 @@ def test_reregistration_failure_stops_the_daemon(tmp_path, caplog):
     # mtime 이 그대로면 리로드가 돌지 않아 루프가 영원히 돈다
     os.utime(runtime.config_path, (2_000_000_000, 2_000_000_000))
 
-    with caplog.at_level(logging.CRITICAL):
-        _run_loop(runtime, state)
-
     # 감시가 하나도 없는 채로 계속 도는 것이 최악이다. 시끄럽게 멈춰야 한다.
+    with caplog.at_level(logging.CRITICAL):
+        loop = threading.Thread(target=_run_loop, args=(runtime, state), daemon=True)
+        loop.start()
+        loop.join(timeout=5)
+
+    # 회귀하면 루프가 끝나지 않는다. 살아 있다는 것 자체가 실패다.
+    assert not loop.is_alive()
     assert state.stop.is_set()
     assert "Cannot re-register watches" in caplog.text

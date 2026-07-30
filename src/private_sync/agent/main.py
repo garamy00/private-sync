@@ -149,6 +149,7 @@ class AgentRuntime:
     config_path: Path
     targets: list[WatchTarget]
     watcher: ConfigWatcher
+    config: AgentConfig
 
 
 class _EventHandler(FileSystemEventHandler):
@@ -229,7 +230,9 @@ def _reload_config(runtime: AgentRuntime) -> bool:
 
     실패하면 아무것도 바꾸지 않고 False를 반환한다. 저장 도중에 읽혔거나 오타가
     있을 뿐이므로 데몬은 계속 돌아야 한다. 고쳐서 저장하면 mtime이 다시 바뀌므로
-    자동으로 재시도된다.
+    자동으로 재시도된다. 다만 `_schedule_targets` 가 실패하면 앞의 교체는 이미
+    적용된 채 예외가 올라간다. 호출자가 데몬을 멈추므로 그 상태로 계속 돌지는
+    않는다.
     """
     try:
         config = load_agent_config(runtime.config_path)
@@ -239,13 +242,19 @@ def _reload_config(runtime: AgentRuntime) -> bool:
 
     targets = build_targets(config.sources)
     known = {(t.label, str(t.path)) for t in runtime.targets}
-    added = [t for t in targets if (t.label, str(t.path)) not in known]
+    if config.remote == runtime.config.remote:
+        added = [t for t in targets if (t.label, str(t.path)) not in known]
+    else:
+        # 서버가 바뀌면 새 저장소는 비어 있다. 전부 다시 올려야 한다.
+        logger.info("Remote changed, re-queueing every target")
+        added = list(targets)
 
     runtime.worker.replace_config(config)
     runtime.handler.replace_targets(targets)
     _schedule_targets(runtime.observer, runtime.handler, targets)
     _log_label_changes(runtime.targets, targets)
     runtime.targets = targets
+    runtime.config = config
 
     # 새로 추가된 대상만 훑는다. 추가하고도 건드리기 전까지 안 올라가면
     # 초기 동기화로 막아둔 문제가 되살아난다.
@@ -258,8 +267,12 @@ def _reload_config(runtime: AgentRuntime) -> bool:
     return True
 
 
-def _run_loop(runtime: AgentRuntime, state: LoopState) -> None:
-    """설정 변경을 반영하고, 디바운스가 끝난 항목을 큐에 넣어 업로드한다."""
+def _run_loop(runtime: AgentRuntime, state: LoopState) -> bool:
+    """설정 변경을 반영하고, 디바운스가 끝난 항목을 큐에 넣어 업로드한다.
+
+    Returns:
+        정상 종료면 True, 감시를 잃어 스스로 멈췄으면 False.
+    """
     while not state.stop.is_set():
         if runtime.watcher.changed():
             try:
@@ -268,11 +281,12 @@ def _run_loop(runtime: AgentRuntime, state: LoopState) -> None:
                 # 기존 watch를 이미 해제한 뒤라 감시가 하나도 없는 채로 남는다.
                 # 정상인 척하며 아무것도 동기화하지 않느니 시끄럽게 멈춘다.
                 logger.critical(
-                    "Cannot re-register watches after reload, stopping: %s",
+                    "Cannot re-register watches after reload, stopping: %s: %s",
                     type(exc).__name__,
+                    exc,
                 )
                 state.stop.set()
-                break
+                return False
 
         with state.lock:
             ready = state.debouncer.due(time.monotonic())
@@ -288,6 +302,8 @@ def _run_loop(runtime: AgentRuntime, state: LoopState) -> None:
             else _TICK_SEC
         )
         state.stop.wait(wait_sec)
+
+    return True
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -325,6 +341,7 @@ def main(argv: list[str] | None = None) -> int:
         config_path=args.config,
         targets=targets,
         watcher=ConfigWatcher(args.config),
+        config=config,
     )
 
     signal.signal(signal.SIGTERM, lambda *_: state.stop.set())
@@ -334,12 +351,13 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("Agent started with %d watch targets", len(targets))
     queue_initial_sync(worker, targets)
     try:
-        _run_loop(runtime, state)
+        healthy = _run_loop(runtime, state)
     finally:
         observer.stop()
         observer.join(timeout=5)
         logger.info("Agent stopped")
-    return 0
+
+    return 0 if healthy else 1
 
 
 if __name__ == "__main__":

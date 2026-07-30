@@ -38,9 +38,14 @@ class ConfigWatcher:
         self._mtime = current
         return True
 
-    def _read_mtime(self) -> float | None:
-        """설정 파일의 mtime을 읽는다. 읽을 수 없으면 None."""
+    def _read_mtime(self) -> int | None:
+        """설정 파일의 mtime을 읽는다. 읽을 수 없으면 None.
+
+        초 단위 float는 1초 해상도 파일시스템에서 같은 초에 저장한 두 번을
+        구분하지 못한다. 오타를 고쳐 곧바로 다시 저장하는 흐름이 막히므로
+        나노초 값을 쓴다.
+        """
         try:
-            return self._path.stat().st_mtime
+            return self._path.stat().st_mtime_ns
         except OSError:
             return None

@@ -157,6 +157,40 @@ sources:
         load_agent_config(cfg)
 
 
+def test_agent_config_rejects_scalar_remote(tmp_path):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    cfg = _write(
+        tmp_path / "agent.yaml",
+        f"""
+remote: dgson@ai
+sources:
+  - label: 문서
+    paths: [{docs}]
+""",
+    )
+
+    # 중첩 매핑을 빠뜨리는 흔한 오타다. 데몬을 죽이지 말고 거부해야 한다.
+    with pytest.raises(ConfigError, match="remote must be a mapping"):
+        load_agent_config(cfg)
+
+
+def test_agent_config_rejects_scalar_source_entry(tmp_path):
+    cfg = _write(
+        tmp_path / "agent.yaml",
+        """
+remote:
+  host: dgson@nonexistent.invalid
+  store: store
+sources:
+  - 문서
+""",
+    )
+
+    with pytest.raises(ConfigError, match="each source must be a mapping"):
+        load_agent_config(cfg)
+
+
 def test_normalize_remote_store_strips_home_prefix():
     assert normalize_remote_store("~/private-sync/store/") == "private-sync/store"
     assert normalize_remote_store("/srv/store/") == "/srv/store"

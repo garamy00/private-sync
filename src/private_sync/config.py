@@ -90,6 +90,9 @@ def _validate_label(label: str) -> None:
 
 def _build_source(raw: dict) -> Source:
     """sources 항목 하나를 검증해 Source로 만든다."""
+    if not isinstance(raw, dict):
+        raise ConfigError(f"each source must be a mapping, got {type(raw).__name__}")
+
     label = str(raw.get("label", ""))
     _validate_label(label)
 
@@ -127,6 +130,9 @@ def load_agent_config(path: Path) -> AgentConfig:
     data = _read_yaml(path)
 
     remote_raw = data.get("remote") or {}
+    if not isinstance(remote_raw, dict):
+        raise ConfigError("remote must be a mapping with host and store")
+
     host = str(remote_raw.get("host", ""))
     store = str(remote_raw.get("store", ""))
     if not host or not store:
