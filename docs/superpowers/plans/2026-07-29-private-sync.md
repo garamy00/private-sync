@@ -3083,7 +3083,7 @@ git commit -m "feat: 텔레그램 Bot API 래퍼 추가"
 **Interfaces:**
 - Consumes: `load_bot_config`, `TelegramClient`, `handlers.extract`, `handlers.handle`, `handlers.Context`, `handlers.TokenMap`, `handlers.SendText`, `handlers.SendFile`, `store.list_dir`, `store.search`, `store.resolve_safe`, `packer.pack_for_send`, 예외들
 - Produces:
-  - `private_sync.bot.main`: `Deliverer(client: TelegramClient, config: BotConfig)` with `run(action: Action, incoming: Incoming) -> None`; `main(argv: list[str] | None = None) -> int`
+  - `private_sync.bot.main`: `Deliverer(client: TelegramClient, config: BotConfig)` with `run(action: Action, incoming: Incoming) -> None`; `_handle_one(update: dict, context: Context, deliverer: Deliverer) -> None`; `main(argv: list[str] | None = None) -> int`
 
 - [ ] **Step 1: 실패하는 테스트 작성**
 
@@ -3094,10 +3094,16 @@ from pathlib import Path
 
 import pytest
 
-from private_sync.bot.handlers import Incoming, SendFile, SendText
-from private_sync.bot.main import Deliverer
+from private_sync.bot.handlers import (
+    Context,
+    Incoming,
+    SendFile,
+    SendText,
+    TokenMap,
+)
+from private_sync.bot.main import Deliverer, _handle_one
 from private_sync.config import BotConfig
-from private_sync.errors import TelegramError
+from private_sync.errors import StoreError, TelegramError
 
 
 class _SpyClient:
@@ -3214,6 +3220,48 @@ def test_none_action_does_nothing(config):
 
     assert client.messages == []
     assert client.documents == []
+
+
+def _start_update():
+    return {"message": {"text": "/start", "chat": {"id": 123}, "message_id": 1}}
+
+
+def test_filesystem_error_while_listing_does_not_kill_the_loop(config):
+    client = _SpyClient()
+
+    def exploding_lister(_rel):
+        # 깨진 심볼릭 링크나 심볼릭 루프에서 실제로 나오는 오류다
+        raise OSError(62, "Too many levels of symbolic links")
+
+    context = Context(
+        chat_id="123",
+        tokens=TokenMap(),
+        lister=exploding_lister,
+        searcher=lambda _keyword: [],
+    )
+
+    # 예외가 밖으로 나오면 봇 프로세스가 죽는다
+    _handle_one(_start_update(), context, Deliverer(client, config))
+
+    assert "오류가 발생했습니다" in client.messages[0][1]
+
+
+def test_store_error_while_listing_reports_missing_file(config):
+    client = _SpyClient()
+
+    def missing_lister(_rel):
+        raise StoreError("path 'x' not found in store")
+
+    context = Context(
+        chat_id="123",
+        tokens=TokenMap(),
+        lister=missing_lister,
+        searcher=lambda _keyword: [],
+    )
+
+    _handle_one(_start_update(), context, Deliverer(client, config))
+
+    assert "동기화 대기 중" in client.messages[0][1]
 ```
 
 - [ ] **Step 2: 테스트가 실패하는지 확인**
@@ -3250,13 +3298,20 @@ from private_sync.bot.handlers import (
 from private_sync.bot.packer import pack_for_send
 from private_sync.bot.telegram import TelegramClient
 from private_sync.config import BotConfig, load_bot_config
-from private_sync.errors import ConfigError, PackError, StoreError, TelegramError
+from private_sync.errors import (
+    ConfigError,
+    PackError,
+    PrivateSyncError,
+    StoreError,
+    TelegramError,
+)
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_CONFIG = Path("~/.config/private-sync/bot.yaml").expanduser()
 _ERROR_SLEEP_SEC = 3
 _MISSING_FILE_MESSAGE = "파일을 찾을 수 없습니다. 동기화 대기 중이거나 삭제되었습니다."
+_INTERNAL_ERROR_MESSAGE = "요청을 처리하는 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
 _SPLIT_NOTICE = (
     "파일이 커서 %d개로 나눠 보냈습니다.\n"
     "PC에서 아래 명령으로 합친 뒤 비밀번호를 입력해 열어주세요.\n"
@@ -3359,6 +3414,28 @@ def _build_context(config: BotConfig, tokens: TokenMap) -> Context:
     )
 
 
+def _handle_one(update: dict, context: Context, deliverer: Deliverer) -> None:
+    """update 하나를 처리한다. 어떤 오류도 루프 밖으로 내보내지 않는다."""
+    incoming = extract(update)
+    if incoming is None:
+        return
+
+    try:
+        action = handle(incoming, context)
+    except StoreError as exc:
+        logger.warning("Store error while handling input: %s", exc)
+        deliverer.run(SendText(text=_MISSING_FILE_MESSAGE), incoming)
+        return
+    except (PrivateSyncError, OSError) as exc:
+        # 깨진 심볼릭 링크 같은 예상 밖 오류로 봇 프로세스가 죽으면,
+        # 사용자는 외부에서 자료를 꺼낼 수단을 통째로 잃는다.
+        logger.error("Unexpected error handling input: %s", type(exc).__name__)
+        deliverer.run(SendText(text=_INTERNAL_ERROR_MESSAGE), incoming)
+        return
+
+    deliverer.run(action, incoming)
+
+
 def _serve(client: TelegramClient, config: BotConfig) -> None:
     """롱폴링 루프. 예외로 죽지 않는다."""
     tokens = TokenMap()
@@ -3377,16 +3454,7 @@ def _serve(client: TelegramClient, config: BotConfig) -> None:
 
         for update in updates:
             offset = int(update.get("update_id", 0)) + 1
-            incoming = extract(update)
-            if incoming is None:
-                continue
-            try:
-                action = handle(incoming, context)
-            except StoreError as exc:
-                logger.warning("Store error while handling input: %s", exc)
-                deliverer.run(SendText(text=_MISSING_FILE_MESSAGE), incoming)
-                continue
-            deliverer.run(action, incoming)
+            _handle_one(update, context, deliverer)
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -3425,7 +3493,7 @@ if __name__ == "__main__":
 - [ ] **Step 4: 테스트 통과 확인**
 
 Run: `.venv/bin/pytest tests/test_bot_main.py -v`
-Expected: PASS (6 passed)
+Expected: PASS (8 passed)
 
 - [ ] **Step 5: 전체 테스트와 커밋**
 
@@ -3433,7 +3501,7 @@ Run:
 ```bash
 .venv/bin/ruff format src tests && .venv/bin/ruff check src tests && .venv/bin/pytest -q
 ```
-Expected: 91 passed
+Expected: 93 passed
 
 ```bash
 git add src/private_sync/bot/main.py tests/test_bot_main.py
@@ -3611,7 +3679,7 @@ Run:
 ```bash
 .venv/bin/ruff format src tests && .venv/bin/ruff check src tests && .venv/bin/pytest -q
 ```
-Expected: 91 passed
+Expected: 93 passed
 
 ```bash
 git add README.md deploy
