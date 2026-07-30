@@ -43,6 +43,7 @@
 `tests/test_config_watch.py`:
 
 ```python
+import logging
 import os
 
 from private_sync.agent.config_watch import ConfigWatcher
@@ -94,6 +95,19 @@ def test_watcher_on_never_existing_file_does_not_raise(tmp_path):
     watcher = ConfigWatcher(tmp_path / "없음.yaml")
 
     assert watcher.changed() is False
+
+
+def test_missing_file_warns_only_once(tmp_path, caplog):
+    config = _write(tmp_path / "agent.yaml")
+    watcher = ConfigWatcher(config)
+    config.unlink()
+
+    with caplog.at_level(logging.WARNING):
+        watcher.changed()
+        watcher.changed()
+
+    # 매 틱마다 같은 경고를 쌓으면 로그가 못 쓰게 된다
+    assert caplog.text.count("is unreadable") == 1
 ```
 
 - [ ] **Step 2: 테스트가 실패하는지 확인**
@@ -132,7 +146,9 @@ class ConfigWatcher:
 
         if current is None:
             if self._mtime is not None:
-                logger.warning("Config file is unreadable, keeping current settings")
+                logger.warning(
+                    "Config file %s is unreadable, keeping current settings", self._path
+                )
                 self._mtime = None
             return False
 
@@ -153,7 +169,7 @@ class ConfigWatcher:
 - [ ] **Step 4: 테스트 통과 확인**
 
 Run: `.venv/bin/pytest tests/test_config_watch.py -v`
-Expected: PASS (5 passed)
+Expected: PASS (6 passed)
 
 - [ ] **Step 5: 린트와 커밋**
 
@@ -594,7 +610,7 @@ Run:
 ```bash
 .venv/bin/ruff format src tests && .venv/bin/ruff check src tests && .venv/bin/pytest -q
 ```
-Expected: 123 passed
+Expected: 124 passed
 
 - [ ] **Step 6: 실제 데몬으로 확인**
 
