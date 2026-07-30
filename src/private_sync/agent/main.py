@@ -115,6 +115,15 @@ class SyncWorker:
         """대기 항목이 남아 있는지 반환한다."""
         return bool(self._pending.items())
 
+    def replace_config(self, config: AgentConfig) -> None:
+        """설정을 교체한다. 대기 목록과 backoff 상태는 그대로 둔다.
+
+        사라진 라벨의 대기 항목은 여기서 손대지 않는다. drain이 이미 알 수 없는
+        라벨을 폐기하므로 중복해서 처리할 이유가 없다.
+        """
+        self._config = config
+        self._excludes = {s.label: s.exclude for s in config.sources}
+
 
 @dataclass
 class LoopState:
@@ -146,6 +155,15 @@ class _EventHandler(FileSystemEventHandler):
             self._state.debouncer.touch(
                 (target.label, str(target.path)), time.monotonic()
             )
+
+    def replace_targets(self, targets: list[WatchTarget]) -> None:
+        """감시 대상 목록을 교체한다.
+
+        observer 스레드가 `on_any_event`에서 이 목록을 읽는다. 완성된 새 리스트로
+        속성을 통째로 갈아끼우기만 하므로, 읽는 쪽은 항상 옛 목록이나 새 목록 중
+        하나를 온전히 보게 된다.
+        """
+        self._targets = targets
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:

@@ -18,10 +18,10 @@ from private_sync.errors import RetryableUploadError, UploadError
 REMOTE = RemoteConfig(host="dgson@ai", store="store")
 
 
-def _config(path: Path) -> AgentConfig:
+def _config(path: Path, label: str = "문서") -> AgentConfig:
     return AgentConfig(
         remote=REMOTE,
-        sources=(Source(label="문서", paths=(path,), exclude=()),),
+        sources=(Source(label=label, paths=(path,), exclude=()),),
     )
 
 
@@ -220,6 +220,55 @@ def test_event_handler_ignores_excluded_file(tmp_path):
     handler.on_any_event(_FakeEvent(str(docs / ".DS_Store")))
 
     assert _released(state) == []
+
+
+def test_replace_config_applies_the_new_label(tmp_path):
+    doc = tmp_path / "a.md"
+    doc.write_text("a", encoding="utf-8")
+    pending = PendingStore(tmp_path / "pending.json")
+    pending.load()
+    calls = []
+    worker = SyncWorker(
+        _config(doc, label="이전"), pending, uploader=lambda *args: calls.append(args)
+    )
+
+    worker.replace_config(_config(doc, label="이후"))
+    worker.enqueue("이후", doc)
+    worker.drain()
+
+    assert [args[1] for args in calls] == ["이후"]
+
+
+def test_replace_config_drops_items_of_removed_labels(tmp_path):
+    doc = tmp_path / "a.md"
+    doc.write_text("a", encoding="utf-8")
+    pending = PendingStore(tmp_path / "pending.json")
+    pending.load()
+    worker = SyncWorker(_config(doc, label="이전"), pending, uploader=lambda *_a: None)
+    worker.enqueue("이전", doc)
+
+    worker.replace_config(_config(doc, label="이후"))
+    worker.drain()
+
+    # 설정에서 사라진 라벨의 대기 항목은 폐기된다
+    assert pending.items() == []
+
+
+def test_replace_targets_changes_what_the_handler_matches(tmp_path):
+    old = tmp_path / "old"
+    old.mkdir()
+    new = tmp_path / "new"
+    new.mkdir()
+    changed = new / "a.md"
+    changed.write_text("a", encoding="utf-8")
+    handler, state = _handler_state(Source(label="이전", paths=(old,), exclude=()))
+
+    handler.replace_targets(
+        build_targets((Source(label="이후", paths=(new,), exclude=()),))
+    )
+    handler.on_any_event(_FakeEvent(str(changed)))
+
+    assert _released(state) == [("이후", str(new))]
 
 
 def test_backoff_grows_then_resets():
