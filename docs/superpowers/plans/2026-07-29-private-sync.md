@@ -2365,6 +2365,14 @@ def test_unknown_command_returns_usage():
     assert action.buttons == ()
 
 
+def test_whitespace_only_message_returns_usage():
+    # 공백만 보낸 메시지로 봇이 죽으면 안 된다
+    action = handle(_message("   "), _ctx())
+
+    assert isinstance(action, SendText)
+    assert "/start" in action.text
+
+
 def test_directory_button_lists_children_with_up_button():
     ctx = _ctx()
     start = handle(_message("/start"), ctx)
@@ -2652,6 +2660,10 @@ def _find(keyword: str, ctx: Context) -> SendText:
 def _handle_message(incoming: Incoming, ctx: Context) -> Action:
     """텍스트 명령을 처리한다."""
     parts = incoming.text.strip().split(maxsplit=1)
+    if not parts:
+        # 공백만 있는 메시지도 텔레그램에서는 유효한 text 로 도착한다
+        return SendText(text=_USAGE)
+
     command = parts[0].lower()
     argument = parts[1].strip() if len(parts) > 1 else ""
 
@@ -2689,7 +2701,7 @@ def handle(incoming: Incoming, ctx: Context) -> Action:
 - [ ] **Step 4: 테스트 통과 확인**
 
 Run: `.venv/bin/pytest tests/test_handlers.py -v`
-Expected: PASS (11 passed)
+Expected: PASS (12 passed)
 
 - [ ] **Step 5: 린트와 커밋**
 
@@ -3372,7 +3384,7 @@ Run:
 ```bash
 .venv/bin/ruff format src tests && .venv/bin/ruff check src tests && .venv/bin/pytest -q
 ```
-Expected: 89 passed
+Expected: 90 passed
 
 ```bash
 git add src/private_sync/bot/main.py tests/test_bot_main.py
@@ -3550,7 +3562,7 @@ Run:
 ```bash
 .venv/bin/ruff format src tests && .venv/bin/ruff check src tests && .venv/bin/pytest -q
 ```
-Expected: 89 passed
+Expected: 90 passed
 
 ```bash
 git add README.md deploy
