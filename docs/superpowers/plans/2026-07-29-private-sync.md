@@ -781,20 +781,28 @@ def test_rsync_args_keep_directory_name_and_apply_excludes():
     )
 
     assert args[0] == "rsync"
-    # -s 없이는 공백 있는 원격 경로가 원격 셸에서 쪼개진다
-    assert "-s" in args
+    # macOS 기본 rsync(openrsync)는 -s 를 모른다. 붙이면 노트북에서 전부 실패한다.
+    assert "-s" not in args
     assert "--exclude=.DS_Store" in args
     assert "--exclude=.git/" in args
     # 트레일링 슬래시가 없어야 원격에 skt/ 디렉토리째로 생성된다
     assert args[-2] == "/Users/me/Documents/skt"
-    assert args[-1] == "dgson@ai:private-sync/store/SKT 문서/"
+    # 공백이 든 원격 경로는 원격 셸이 쪼개지 않도록 따옴표로 감싼다
+    assert args[-1] == "dgson@ai:'private-sync/store/SKT 문서/'"
 
 
 def test_rsync_args_for_single_file():
     args = build_rsync_args(REMOTE, "메모", Path("/Users/me/work/견적서.xlsx"), ())
 
     assert args[-2] == "/Users/me/work/견적서.xlsx"
-    assert args[-1] == "dgson@ai:private-sync/store/메모/"
+    # 한글은 shlex 기준 안전 문자가 아니라 따옴표가 붙는다
+    assert args[-1] == "dgson@ai:'private-sync/store/메모/'"
+
+
+def test_rsync_args_leave_plain_ascii_path_unquoted():
+    args = build_rsync_args(REMOTE, "docs", Path("/Users/me/docs"), ())
+
+    assert args[-1] == "dgson@ai:private-sync/store/docs/"
 
 
 def test_mkdir_args_quote_label_with_spaces():
@@ -908,14 +916,17 @@ def build_rsync_args(
 ) -> list[str]:
     """rsync 명령 인수를 조립한다.
 
-    -s(--protect-args)로 원격 경로의 공백·특수문자를 rsync가 직접 처리하게
-    한다. 로컬 경로에 트레일링 슬래시를 붙이지 않아 디렉토리는 자기 이름째로
+    원격 경로는 원격 셸이 해석하므로 shlex.quote로 감싼다. rsync 3의
+    `-s`(--protect-args)를 쓰지 않는 이유는 macOS 기본 rsync(openrsync)가
+    그 옵션을 모르기 때문이다. 붙이면 노트북에서 모든 업로드가 실패한다.
+
+    로컬 경로에 트레일링 슬래시를 붙이지 않아 디렉토리는 자기 이름째로
     원격에 생성된다.
     """
-    args = ["rsync", "-az", "-s", "--partial"]
-    args += ["--exclude=%s" % pattern for pattern in exclude]
+    args = ["rsync", "-az", "--partial"]
+    args += [f"--exclude={pattern}" for pattern in exclude]
     args.append(str(path))
-    args.append("%s:%s/" % (remote.host, remote_dir(remote, label)))
+    args.append(f"{remote.host}:{shlex.quote(remote_dir(remote, label) + '/')}")
     return args
 
 
@@ -989,7 +1000,7 @@ def upload(
 - [ ] **Step 4: 테스트 통과 확인**
 
 Run: `.venv/bin/pytest tests/test_uploader.py -v`
-Expected: PASS (8 passed)
+Expected: PASS (9 passed)
 
 - [ ] **Step 5: 린트와 커밋**
 
@@ -3593,7 +3604,7 @@ Run:
 ```bash
 .venv/bin/ruff format src tests && .venv/bin/ruff check src tests && .venv/bin/pytest -q
 ```
-Expected: 96 passed
+Expected: 97 passed
 
 ```bash
 git add src/private_sync/bot/main.py tests/test_bot_main.py
@@ -3771,7 +3782,7 @@ Run:
 ```bash
 .venv/bin/ruff format src tests && .venv/bin/ruff check src tests && .venv/bin/pytest -q
 ```
-Expected: 96 passed
+Expected: 97 passed
 
 ```bash
 git add README.md deploy
