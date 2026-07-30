@@ -26,7 +26,9 @@ class ConfigWatcher:
 
         if current is None:
             if self._mtime is not None:
-                logger.warning("Config file is unreadable, keeping current settings")
+                logger.warning(
+                    "Config file %s is unreadable, keeping current settings", self._path
+                )
                 self._mtime = None
             return False
 

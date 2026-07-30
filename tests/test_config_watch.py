@@ -1,3 +1,4 @@
+import logging
 import os
 
 from private_sync.agent.config_watch import ConfigWatcher
@@ -49,3 +50,16 @@ def test_watcher_on_never_existing_file_does_not_raise(tmp_path):
     watcher = ConfigWatcher(tmp_path / "없음.yaml")
 
     assert watcher.changed() is False
+
+
+def test_missing_file_warns_only_once(tmp_path, caplog):
+    config = _write(tmp_path / "agent.yaml")
+    watcher = ConfigWatcher(config)
+    config.unlink()
+
+    with caplog.at_level(logging.WARNING):
+        watcher.changed()
+        watcher.changed()
+
+    # 매 틱마다 같은 경고를 쌓으면 로그가 못 쓰게 된다
+    assert caplog.text.count("is unreadable") == 1
