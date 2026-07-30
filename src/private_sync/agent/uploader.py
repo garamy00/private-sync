@@ -42,14 +42,17 @@ def build_rsync_args(
 ) -> list[str]:
     """rsync 명령 인수를 조립한다.
 
-    -s(--protect-args)로 원격 경로의 공백·특수문자를 rsync가 직접 처리하게
-    한다. 로컬 경로에 트레일링 슬래시를 붙이지 않아 디렉토리는 자기 이름째로
+    원격 경로는 원격 셸이 해석하므로 shlex.quote로 감싼다. rsync 3의
+    `-s`(--protect-args)를 쓰지 않는 이유는 macOS 기본 rsync(openrsync)가
+    그 옵션을 모르기 때문이다. 붙이면 노트북에서 모든 업로드가 실패한다.
+
+    로컬 경로에 트레일링 슬래시를 붙이지 않아 디렉토리는 자기 이름째로
     원격에 생성된다.
     """
-    args = ["rsync", "-az", "-s", "--partial"]
+    args = ["rsync", "-az", "--partial"]
     args += [f"--exclude={pattern}" for pattern in exclude]
     args.append(str(path))
-    args.append(f"{remote.host}:{remote_dir(remote, label)}/")
+    args.append(f"{remote.host}:{shlex.quote(remote_dir(remote, label) + '/')}")
     return args
 
 
