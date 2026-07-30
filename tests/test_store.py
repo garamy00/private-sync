@@ -111,6 +111,29 @@ def test_symlink_inside_store_stays_visible(store):
     assert "바로가기.docx" in [e.name for e in list_dir(store, "메모")]
 
 
+def test_symlink_loop_is_skipped_instead_of_raising(store):
+    # rsync -a 는 심볼릭 링크를 그대로 옮기므로 자기 참조 링크가 저장소에 들어올 수 있다.
+    # Path.resolve() 는 여기서 OSError 가 아니라 RuntimeError 를 던진다.
+    loop = store / "메모" / "loop"
+    loop.symlink_to(loop)
+
+    names = [e.name for e in list_dir(store, "메모")]
+
+    assert "loop" not in names
+    # 루프 옆의 멀쩡한 파일은 계속 보여야 한다
+    assert "계약_메모.txt" in names
+
+
+def test_broken_symlink_does_not_hide_sibling_files(store):
+    # 저장소 안을 가리키지만 대상이 없는 링크. 격리 필터는 통과하고 stat 에서 터진다.
+    (store / "메모" / "broken.txt").symlink_to(store / "메모" / "없는대상.txt")
+
+    names = [e.name for e in list_dir(store, "메모")]
+
+    assert "broken.txt" not in names
+    assert "계약_메모.txt" in names
+
+
 def test_sibling_directory_sharing_name_prefix_is_rejected(store):
     evil = store.parent / (store.name + "-evil")
     evil.mkdir()

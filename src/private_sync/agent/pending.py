@@ -67,12 +67,21 @@ class PendingStore:
         self._flush()
 
     def _flush(self) -> None:
-        """임시 파일에 쓴 뒤 원자적으로 교체해 중간 상태를 남기지 않는다."""
+        """임시 파일에 쓴 뒤 원자적으로 교체해 중간 상태를 남기지 않는다.
+
+        쓰기에 실패해도 예외를 올리지 않는다. 여기서 죽으면 동기화 데몬 전체가
+        내려간다. 메모리상의 목록은 유지되므로 이번 세션은 계속 동작한다.
+        """
         payload = json.dumps(
             [{"label": item.label, "path": item.path} for item in self.items()],
             ensure_ascii=False,
         )
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._path.with_name(self._path.name + ".tmp")
-        tmp.write_text(payload, encoding="utf-8")
-        os.replace(tmp, self._path)
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._path.with_name(self._path.name + ".tmp")
+            tmp.write_text(payload, encoding="utf-8")
+            os.replace(tmp, self._path)
+        except OSError as exc:
+            logger.error(
+                "Cannot persist pending list to %s: %s", self._path, exc.strerror
+            )

@@ -110,7 +110,11 @@ def _build_source(raw: dict) -> Source:
     if duplicates:
         raise ConfigError(f"source {label!r} has conflicting store names: {duplicates}")
 
-    exclude = tuple(str(x) for x in (raw.get("exclude") or []))
+    raw_exclude = raw.get("exclude") or []
+    if not isinstance(raw_exclude, list):
+        raise ConfigError(f"source {label!r} exclude must be a list")
+
+    exclude = tuple(str(x) for x in raw_exclude)
     return Source(label=label, paths=tuple(paths), exclude=DEFAULT_EXCLUDES + exclude)
 
 

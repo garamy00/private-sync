@@ -25,6 +25,9 @@ class TokenMap:
 
     텔레그램 callback_data 는 64바이트 제한이 있어 경로를 직접 담을 수 없다.
     토큰만 노출하므로 경로 조작 시도도 함께 차단된다.
+
+    한도를 넘으면 가장 먼저 발급된 토큰부터 버린다(입력 순서 FIFO). 조회는
+    순서를 갱신하지 않으므로 LRU 가 아니다.
     """
 
     def __init__(self, limit: int = 500) -> None:
@@ -183,7 +186,7 @@ def _handle_callback(incoming: Incoming, ctx: Context) -> Action:
     """버튼 콜백을 처리한다."""
     resolved = ctx.tokens.get(incoming.text)
     if resolved is None:
-        # 봇 재시작이나 LRU 축출로 토큰이 사라진 경우다
+        # 봇 재시작이나 오래된 토큰 축출로 토큰이 사라진 경우다
         return SendText(text="목록이 만료되었습니다. /start 로 다시 시작해 주세요.")
 
     kind, rel = resolved

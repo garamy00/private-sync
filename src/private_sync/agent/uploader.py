@@ -90,6 +90,9 @@ def upload(
         mkdir = runner(build_mkdir_args(remote, label), _SSH_TIMEOUT_SEC + 5)
     except subprocess.TimeoutExpired as exc:
         raise RetryableUploadError(f"ssh mkdir timed out for label {label}") from exc
+    except OSError as exc:
+        # launchd 는 최소 PATH 만 넘기므로 ssh·rsync 를 못 찾을 수 있다
+        raise UploadError(f"cannot run ssh: {exc.strerror}") from exc
 
     if mkdir.returncode == 255:
         raise RetryableUploadError(
@@ -107,6 +110,9 @@ def upload(
         )
     except subprocess.TimeoutExpired as exc:
         raise RetryableUploadError(f"rsync timed out for {path}") from exc
+    except OSError as exc:
+        # launchd 는 최소 PATH 만 넘기므로 ssh·rsync 를 못 찾을 수 있다
+        raise UploadError(f"cannot run rsync: {exc.strerror}") from exc
 
     if result.returncode == 0:
         logger.info("Uploaded %s under label %s", path, label)

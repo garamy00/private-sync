@@ -27,7 +27,6 @@ from private_sync.config import BotConfig, load_bot_config
 from private_sync.errors import (
     ConfigError,
     PackError,
-    PrivateSyncError,
     StoreError,
     TelegramError,
 )
@@ -61,7 +60,7 @@ class Deliverer:
     def run(self, action: Action, incoming: Incoming) -> None:
         """Action을 실행한다. 실패는 로깅하고 사용자에게 알린다."""
         if incoming.callback_id:
-            self._answer(incoming.callback_id)
+            self.answer(incoming.callback_id)
 
         if action is None:
             return
@@ -72,7 +71,7 @@ class Deliverer:
 
         self._send_file(action, incoming)
 
-    def _answer(self, callback_id: str) -> None:
+    def answer(self, callback_id: str) -> None:
         """버튼 로딩 표시를 해제한다. 실패는 무시해도 무해하다."""
         try:
             self._client.answer_callback(callback_id)
@@ -154,25 +153,39 @@ def _build_context(config: BotConfig, tokens: TokenMap) -> Context:
     )
 
 
-def _handle_one(update: dict, context: Context, deliverer: Deliverer) -> None:
-    """update 하나를 처리한다. 어떤 오류도 루프 밖으로 내보내지 않는다."""
-    incoming = extract(update)
-    if incoming is None:
-        return
+def _report(deliverer: Deliverer, incoming: Incoming | None, text: str) -> None:
+    """오류 안내를 보내고 콜백 로딩 표시도 함께 해제한다."""
+    if incoming is not None and incoming.callback_id:
+        deliverer.answer(incoming.callback_id)
+    deliverer.notify(text)
 
-    # 전달까지 감싸야 docstring 의 약속이 실제로 지켜진다. 하위 모듈이
-    # 계약을 어기고 raw OSError 를 던져도 봇 프로세스는 살아 있어야 한다.
+
+def _handle_one(update: dict, context: Context, deliverer: Deliverer) -> None:
+    """update 하나를 처리한다. 어떤 오류도 루프 밖으로 내보내지 않는다.
+
+    여기서 예외가 새면 봇 프로세스가 죽는다. 텔레그램은 다음 getUpdates 가
+    더 큰 offset 을 실어 보낼 때까지 같은 update 를 다시 보내므로, 재시작해도
+    같은 자리에서 또 죽어 무한 크래시 루프가 된다.
+    """
+    incoming = None
     try:
+        incoming = extract(update)
+        if incoming is None:
+            return
+
         action = handle(incoming, context)
         deliverer.run(action, incoming)
     except StoreError as exc:
         logger.warning("Store error while handling input: %s", exc)
-        deliverer.notify(_MISSING_FILE_MESSAGE)
-    except (PrivateSyncError, OSError) as exc:
-        # 깨진 심볼릭 링크 같은 예상 밖 오류로 봇 프로세스가 죽으면,
-        # 사용자는 외부에서 자료를 꺼낼 수단을 통째로 잃는다.
+        _report(deliverer, incoming, _MISSING_FILE_MESSAGE)
+    except Exception as exc:  # noqa: BLE001
+        # 심볼릭 루프는 RuntimeError 를, 기형 update 는 AttributeError·TypeError 를
+        # 던진다. 타입을 좁게 나열하면 목록에 없는 것 하나로 봇이 내려간다.
+        # 메시지 대신 타입명만 남기는 이유는 토큰이 담긴 URL 이 섞일 수 있어서다.
+        # BLE001 을 끈 이유도 같다. ruff 가 blind except 를 봐주는 형태는
+        # logger.exception 뿐인데, 그러면 토큰이 든 트레이스백이 로그에 남는다.
         logger.error("Unexpected error handling input: %s", type(exc).__name__)
-        deliverer.notify(_INTERNAL_ERROR_MESSAGE)
+        _report(deliverer, incoming, _INTERNAL_ERROR_MESSAGE)
 
 
 def _serve(client: TelegramClient, config: BotConfig) -> None:
@@ -192,7 +205,13 @@ def _serve(client: TelegramClient, config: BotConfig) -> None:
             continue
 
         for update in updates:
-            offset = int(update.get("update_id", 0)) + 1
+            if not isinstance(update, dict):
+                logger.warning("Skipping malformed update entry")
+                continue
+
+            raw_id = update.get("update_id")
+            if isinstance(raw_id, int):
+                offset = raw_id + 1
             _handle_one(update, context, deliverer)
 
 
@@ -210,6 +229,9 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.debug else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    # requests/urllib3 는 DEBUG 레벨에서 요청 URL 을 그대로 기록한다. 봇 API
+    # URL 에는 토큰이 들어 있으므로 이 계층만 눌러 둔다.
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
 
     try:
         config = load_bot_config(args.config)

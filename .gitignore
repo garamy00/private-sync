@@ -3,6 +3,8 @@
 .superpowers/
 __pycache__/
 *.pyc
+*.egg-info/
+*.swp
 agent.yaml
 bot.yaml
 .pending.json

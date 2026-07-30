@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 import pytest
@@ -9,7 +10,7 @@ from private_sync.bot.handlers import (
     SendText,
     TokenMap,
 )
-from private_sync.bot.main import Deliverer, _handle_one
+from private_sync.bot.main import Deliverer, _handle_one, _serve, main
 from private_sync.config import BotConfig
 from private_sync.errors import PackError, StoreError, TelegramError
 
@@ -252,3 +253,99 @@ def test_store_error_while_listing_reports_missing_file(config):
     _handle_one(_start_update(), context, Deliverer(client, config))
 
     assert "동기화 대기 중" in client.messages[0][1]
+
+
+def _context_with_lister(lister, tokens=None):
+    return Context(
+        chat_id="123",
+        tokens=tokens or TokenMap(),
+        lister=lister,
+        searcher=lambda _keyword: [],
+    )
+
+
+def test_runtime_error_while_listing_does_not_kill_the_loop(config):
+    client = _SpyClient()
+
+    def looping_lister(_rel):
+        # 저장소 안의 심볼릭 루프에서 Path.resolve() 가 실제로 던지는 예외다.
+        # OSError 가 아니므로 좁은 except 목록으로는 잡히지 않는다.
+        raise RuntimeError("Symlink loop from '/store/loop'")
+
+    # 예외가 밖으로 나오면 봇 프로세스가 죽고, 텔레그램이 같은 update 를
+    # 다시 보내므로 재시작해도 같은 자리에서 또 죽는다
+    _handle_one(
+        _start_update(), _context_with_lister(looping_lister), Deliverer(client, config)
+    )
+
+    assert "오류가 발생했습니다" in client.messages[0][1]
+
+
+def test_error_from_callback_clears_the_button_spinner(config):
+    client = _SpyClient()
+    tokens = TokenMap()
+    token = tokens.put("dir", "메모")
+
+    def looping_lister(_rel):
+        raise RuntimeError("Symlink loop from '/store/loop'")
+
+    update = {
+        "callback_query": {
+            "id": "cb1",
+            "data": token,
+            "message": {"message_id": 9, "chat": {"id": 123}},
+        }
+    }
+
+    _handle_one(
+        update, _context_with_lister(looping_lister, tokens), Deliverer(client, config)
+    )
+
+    # 콜백에 응답하지 않으면 휴대폰의 버튼 로딩 표시가 영원히 돈다
+    assert client.answered == ["cb1"]
+    assert "오류가 발생했습니다" in client.messages[0][1]
+
+
+class _LoopStopped(Exception):
+    """무한 루프를 테스트에서 빠져나오기 위한 신호."""
+
+
+class _LoopClient(_SpyClient):
+    """지정한 배치를 한 번 돌려주고 다음 호출에서 루프를 끊는다."""
+
+    def __init__(self, updates):
+        super().__init__()
+        self._updates = updates
+        self.offsets = []
+
+    def get_updates(self, offset=None):
+        self.offsets.append(offset)
+        if self._updates is None:
+            raise _LoopStopped
+        batch, self._updates = self._updates, None
+        return batch
+
+
+def test_debug_mode_silences_the_layer_that_logs_the_token(tmp_path, monkeypatch):
+    # urllib3 는 DEBUG 에서 요청 URL 을 그대로 찍는데, 봇 API URL 에는 토큰이 들어 있다.
+    # 유효 레벨이 아니라 자체 레벨을 보는 이유는 루트 레벨과 무관하게 이 계층이
+    # 눌려 있어야 저널에 토큰이 남지 않기 때문이다.
+    urllib3_logger = logging.getLogger("urllib3")
+    monkeypatch.setattr(urllib3_logger, "level", logging.NOTSET)
+
+    # 설정 오류로 즉시 반환하지만 로깅 설정은 이미 끝난 뒤다
+    assert main(["--config", str(tmp_path / "없는.yaml"), "--debug"]) == 1
+
+    assert urllib3_logger.level == logging.WARNING
+
+
+def test_malformed_update_entry_does_not_break_the_poll_loop(config):
+    good = dict(_start_update(), update_id=7)
+    client = _LoopClient(["not a dict", None, good])
+
+    with pytest.raises(_LoopStopped):
+        _serve(client, config)
+
+    # 기형 항목을 건너뛰고 정상 update 까지 처리했으며, offset 도 전진했다
+    assert client.messages, "정상 update 가 처리되지 않았다"
+    assert client.offsets == [None, 8]

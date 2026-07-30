@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from private_sync.agent.pending import PendingItem, PendingStore
 
 
@@ -59,3 +61,20 @@ def test_missing_state_file_starts_empty(tmp_path):
     store.load()
 
     assert store.items() == []
+
+
+def test_unwritable_state_file_does_not_kill_the_daemon(tmp_path, monkeypatch):
+    store = PendingStore(tmp_path / "pending.json")
+    store.load()
+    item = PendingItem(label="메모", path="/Users/me/n.md")
+
+    def refusing_write(*_args, **_kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "write_text", refusing_write)
+
+    # 영속화 실패로 예외가 올라오면 동기화 데몬 전체가 내려간다
+    store.add(item)
+
+    # 이번 세션은 메모리상의 목록으로 계속 동작해야 한다
+    assert store.items() == [item]

@@ -134,6 +134,29 @@ sources:
         load_agent_config(cfg)
 
 
+def test_agent_config_rejects_scalar_exclude(tmp_path):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+
+    # 리스트 대신 문자열을 쓰면 한 글자씩 순회돼 '*' 패턴이 생기고,
+    # 그 패턴이 모든 경로에 걸려 아무것도 동기화되지 않는다
+    cfg = _write(
+        tmp_path / "agent.yaml",
+        f"""
+remote:
+  host: dgson@ai
+  store: store
+sources:
+  - label: 문서
+    paths: [{docs}]
+    exclude: "*.tmp"
+""",
+    )
+
+    with pytest.raises(ConfigError, match="exclude must be a list"):
+        load_agent_config(cfg)
+
+
 def test_normalize_remote_store_strips_home_prefix():
     assert normalize_remote_store("~/private-sync/store/") == "private-sync/store"
     assert normalize_remote_store("/srv/store/") == "/srv/store"

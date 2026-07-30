@@ -98,8 +98,13 @@ class SyncWorker:
                 self.backoff.fail()
                 return
             except UploadError as exc:
-                # 재시도해도 실패할 오류는 격리해 무한 루프를 막는다
-                logger.error("Upload failed permanently for %s: %s", item.path, exc)
+                # 재시도해도 실패할 오류는 격리해 무한 루프를 막는다. 다만
+                # 설정·환경 문제면 모든 항목이 조용히 버려지므로 눈에 띄게 남긴다.
+                logger.critical(
+                    "Dropping %s permanently, sync will not retry it: %s",
+                    item.path,
+                    exc,
+                )
                 self._pending.discard(item)
                 continue
 
