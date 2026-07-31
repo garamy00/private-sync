@@ -105,6 +105,14 @@ def _build_source(raw: dict) -> Source:
         path = Path(str(item)).expanduser()
         if not path.exists():
             raise ConfigError(f"source {label!r} path does not exist: {path}")
+        # watchdog은 실제 경로(realpath)로 이벤트를 보고하므로, 심볼릭 링크를
+        # 거치는 설정 경로도 미리 resolve해 저장해야 이벤트와 계속 매칭된다
+        try:
+            path = path.resolve()
+        except RuntimeError as exc:
+            raise ConfigError(
+                f"source {label!r} path has a symlink loop: {path}"
+            ) from exc
         paths.append(path)
 
     # 저장 이름이 겹치면 서버에서 서로 덮어쓰므로 시작 시점에 잡는다

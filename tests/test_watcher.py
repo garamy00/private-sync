@@ -4,7 +4,7 @@ from private_sync.agent.watcher import (
     is_excluded,
     match_target,
 )
-from private_sync.config import Source
+from private_sync.config import Source, load_agent_config
 
 
 def test_directory_target_watches_itself_recursively(tmp_path):
@@ -77,6 +77,41 @@ def test_specific_file_target_survives_broader_exclude(tmp_path):
 
     # 앞선 대상의 exclude가 뒤에 개별 등록된 파일을 가려서는 안 된다
     assert match_target(quote, targets).label == "견적서"
+
+
+def test_symlinked_directory_target_matches_event_under_real_path(tmp_path):
+    """/etc가 /private/etc의 심볼릭 링크인 macOS 사례를 그대로 재현한다.
+
+    watchdog은 감시 대상을 실제 경로(realpath)로 등록해 이벤트도 그 경로로
+    보고하므로, config.py가 심볼릭 링크 경로를 resolve해 저장하지 않으면
+    이벤트가 감시 대상과 영영 매칭되지 않는다.
+    """
+    real_dir = tmp_path / "real_etc"
+    real_dir.mkdir()
+    (real_dir / "hosts").write_text("127.0.0.1 localhost", encoding="utf-8")
+    link = tmp_path / "etc"
+    link.symlink_to(real_dir)
+
+    cfg = tmp_path / "agent.yaml"
+    cfg.write_text(
+        f"""
+remote:
+  host: user@sync-server
+  store: store
+sources:
+  - label: 설정
+    paths:
+      - {link}
+""",
+        encoding="utf-8",
+    )
+
+    conf = load_agent_config(cfg)
+    targets = build_targets(conf.sources)
+
+    # watchdog이 실제로 보고하는 경로는 심볼릭 링크가 아니라 실제 경로다
+    event_path = real_dir.resolve() / "hosts"
+    assert match_target(event_path, targets) is not None
 
 
 def test_is_excluded_matches_glob_on_any_part():

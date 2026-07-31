@@ -216,6 +216,58 @@ def test_bot_config_reads_secrets_from_env(tmp_path):
     assert conf.zip_password == "pw"
 
 
+def test_agent_config_resolves_symlinked_source_path(tmp_path):
+    # /etc가 /private/etc의 심볼릭 링크인 macOS 사례를 그대로 재현한다.
+    # watchdog은 실제 경로(/private/etc/hosts)로 이벤트를 보고하므로, 설정에
+    # 심볼릭 링크 경로를 그대로 저장하면 감시 등록과 이벤트 경로가 어긋난다.
+    real_dir = tmp_path / "real_docs"
+    real_dir.mkdir()
+    link = tmp_path / "link_docs"
+    link.symlink_to(real_dir)
+
+    cfg = _write(
+        tmp_path / "agent.yaml",
+        f"""
+remote:
+  host: user@sync-server
+  store: store
+sources:
+  - label: 문서
+    paths:
+      - {link}
+""",
+    )
+
+    conf = load_agent_config(cfg)
+
+    assert conf.sources[0].paths == (real_dir.resolve(),)
+
+
+def test_agent_config_rejects_symlink_loop_path(tmp_path):
+    # 심볼릭 루프에서 Path.resolve()는 RuntimeError를 던진다.
+    # ConfigError로 변환하지 않으면 daemon의 예외 처리 범위를 벗어나 죽는다.
+    loop_a = tmp_path / "loop_a"
+    loop_b = tmp_path / "loop_b"
+    loop_a.symlink_to(loop_b)
+    loop_b.symlink_to(loop_a)
+
+    cfg = _write(
+        tmp_path / "agent.yaml",
+        f"""
+remote:
+  host: user@sync-server
+  store: store
+sources:
+  - label: 문서
+    paths:
+      - {loop_a}
+""",
+    )
+
+    with pytest.raises(ConfigError):
+        load_agent_config(cfg)
+
+
 def test_bot_config_reports_all_missing_env_vars(tmp_path):
     store = tmp_path / "store"
     store.mkdir()
