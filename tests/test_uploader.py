@@ -1,5 +1,8 @@
 import shutil
 import subprocess
+import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -7,7 +10,9 @@ import pytest
 from private_sync.agent.uploader import (
     build_mkdir_args,
     build_rsync_args,
+    reset_command_guard,
     run_command,
+    terminate_running_command,
     upload,
 )
 from private_sync.config import RemoteConfig
@@ -15,9 +20,28 @@ from private_sync.errors import RetryableUploadError, UploadError
 
 REMOTE = RemoteConfig(host="user@sync-server", store="private-sync/store")
 
+# 자식은 넉넉히 자게 두고, 테스트는 그보다 훨씬 짧은 상한에서 판정한다.
+# 회귀 시 통째로 멈추지 않고 실패로 끝나게 하려는 것이다.
+_SLOW_CHILD = [sys.executable, "-c", "import time; time.sleep(30)"]
+_CHILD_TIMEOUT_SEC = 25
+_CUT_DEADLINE_SEC = 5.0
+
+
+@pytest.fixture(autouse=True)
+def _fresh_command_guard():
+    """가드의 정지 상태가 다른 테스트로 새지 않게 한다."""
+    reset_command_guard()
+    yield
+    reset_command_guard()
+
 
 def _ok(_args, _timeout):
     return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+
+def _killed(args):
+    # 시그널로 끊긴 자식은 음수 반환 코드를 남긴다(SIGTERM 이면 -15)
+    return subprocess.CompletedProcess(args=args, returncode=-15, stdout="", stderr="")
 
 
 def _failing(code, stderr=""):
@@ -57,6 +81,41 @@ def test_rsync_args_leave_plain_ascii_path_unquoted():
     args = build_rsync_args(REMOTE, "docs", Path("/Users/me/docs"), ())
 
     assert args[-1] == "user@sync-server:private-sync/store/docs/"
+
+
+def test_rsync_args_carry_connect_and_stall_timeouts():
+    """rsync 자신도 대기 상한을 갖는지 확인한다.
+
+    Wi-Fi 가 끊긴 채 시작한 전송은 파이썬 쪽 상한(600초)까지 매달려 있어서
+    종료를 지연시킨다. `-e` 값은 rsync 가 직접 쪼개므로 한 인수여야 한다.
+    """
+    args = build_rsync_args(REMOTE, "docs", Path("/Users/me/docs"), ())
+
+    assert "--timeout=60" in args
+    dash_e = args.index("-e")
+    assert args[dash_e + 1] == "ssh -o BatchMode=yes -o ConnectTimeout=15"
+
+
+def test_signal_killed_rsync_is_retryable():
+    """시그널로 끊긴 rsync 는 폐기되지 않고 다음 실행에 다시 올라가야 한다."""
+
+    def runner(args, timeout):
+        if args[0] == "ssh":
+            return _ok(args, timeout)
+        return _killed(args)
+
+    with pytest.raises(RetryableUploadError):
+        upload(REMOTE, "메모", Path("/Users/me/a.md"), (), runner=runner)
+
+
+def test_signal_killed_ssh_mkdir_is_retryable():
+    """mkdir 단계가 시그널로 끊겨도 항목은 대기 목록에 남아야 한다."""
+
+    def runner(args, _timeout):
+        return _killed(args)
+
+    with pytest.raises(RetryableUploadError):
+        upload(REMOTE, "메모", Path("/Users/me/a.md"), (), runner=runner)
 
 
 def test_mkdir_args_quote_label_with_spaces():
@@ -144,6 +203,48 @@ def test_missing_rsync_binary_is_reported_as_permanent_upload_error():
 
     assert not isinstance(excinfo.value, RetryableUploadError)
     assert "cannot run rsync" in str(excinfo.value)
+
+
+def test_terminate_cuts_a_running_child_short():
+    """실제로 오래 도는 자식이 종료 요청 직후 끊기는지 확인한다.
+
+    데몬은 업로드 중에도 즉시 멈출 수 있어야 한다. 네트워크 없이 로컬 자식으로
+    같은 상황을 만든다.
+    """
+    started = threading.Event()
+    outcome: dict[str, object] = {}
+
+    def call_run_command() -> None:
+        started.set()
+        begin = time.monotonic()
+        outcome["result"] = run_command(_SLOW_CHILD, _CHILD_TIMEOUT_SEC)
+        outcome["elapsed"] = time.monotonic() - begin
+
+    caller = threading.Thread(target=call_run_command, daemon=True)
+    caller.start()
+    assert started.wait(_CUT_DEADLINE_SEC)
+    # 자식이 실제로 떠서 돌고 있는 상태를 끊는 경로를 확인한다
+    time.sleep(0.5)
+
+    terminate_running_command()
+    caller.join(_CUT_DEADLINE_SEC)
+
+    assert not caller.is_alive(), "run_command did not return after terminate"
+    assert outcome["elapsed"] < _CUT_DEADLINE_SEC
+    # 시그널로 끊긴 자식은 음수 반환 코드를 남긴다
+    assert outcome["result"].returncode < 0
+
+
+def test_command_started_after_terminate_does_not_run():
+    """정지 이후 시작된 명령은 자식을 띄우지 않고 즉시 돌아온다."""
+    # 실행 중인 명령이 없어도 호출은 안전해야 한다
+    terminate_running_command()
+
+    begin = time.monotonic()
+    result = run_command(_SLOW_CHILD, _CHILD_TIMEOUT_SEC)
+
+    assert time.monotonic() - begin < _CUT_DEADLINE_SEC
+    assert result.returncode < 0
 
 
 def test_built_rsync_args_actually_work_with_the_real_rsync_binary(tmp_path):

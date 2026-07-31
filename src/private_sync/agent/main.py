@@ -18,7 +18,7 @@ from watchdog.observers.api import BaseObserver
 
 from private_sync.agent.config_watch import ConfigWatcher
 from private_sync.agent.pending import PendingItem, PendingStore
-from private_sync.agent.uploader import upload
+from private_sync.agent.uploader import terminate_running_command, upload
 from private_sync.agent.watcher import (
     Debouncer,
     WatchTarget,
@@ -344,8 +344,18 @@ def main(argv: list[str] | None = None) -> int:
         config=config,
     )
 
-    signal.signal(signal.SIGTERM, lambda *_: state.stop.set())
-    signal.signal(signal.SIGINT, lambda *_: state.stop.set())
+    def request_stop(*_: object) -> None:
+        """정지 플래그를 세우고 실행 중인 자식 명령을 끊는다.
+
+        플래그만 세우면 업로드가 끝날 때까지 루프가 그것을 보지 못한다. 하필
+        종료 시퀀스 초반에 Wi-Fi 가 끊기므로, 전송 중인 rsync 는 자기 상한까지
+        매달려 있고 그만큼 로그아웃이 밀린다.
+        """
+        state.stop.set()
+        terminate_running_command()
+
+    signal.signal(signal.SIGTERM, request_stop)
+    signal.signal(signal.SIGINT, request_stop)
 
     observer.start()
     logger.info("Agent started with %d watch targets", len(targets))
