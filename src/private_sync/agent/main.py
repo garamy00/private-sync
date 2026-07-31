@@ -18,7 +18,11 @@ from watchdog.observers.api import BaseObserver
 
 from private_sync.agent.config_watch import ConfigWatcher
 from private_sync.agent.pending import PendingItem, PendingStore
-from private_sync.agent.uploader import terminate_running_command, upload
+from private_sync.agent.uploader import (
+    reset_command_guard,
+    terminate_running_command,
+    upload,
+)
 from private_sync.agent.watcher import (
     Debouncer,
     WatchTarget,
@@ -313,6 +317,10 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.debug else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+
+    # 가드는 모듈 전역이라 이전 실행의 정지 상태가 그대로 남는다. 풀지 않으면
+    # 같은 프로세스에서 다시 시작했을 때 모든 명령이 조용히 거절된다.
+    reset_command_guard()
 
     try:
         config = load_agent_config(args.config)

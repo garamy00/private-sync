@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import shlex
 import signal
 import subprocess
@@ -30,6 +31,49 @@ _STDERR_LOG_LIMIT = 200
 # 시그널로 끊긴 자식의 반환 코드. 자식을 띄우지 않고 거절할 때도 같은 값을 쓴다.
 _SIGNALLED_RETURNCODE = -signal.SIGTERM
 
+# 우리가 스스로 보내는 종료 시그널의 반환 코드. 이 값으로 끊긴 자식만 재시도
+# 대상이다. SIGSEGV·SIGKILL·SIGBUS 처럼 자식이 스스로 깨진 경우는 다시 시도해도
+# 같은 결과이고, drain 이 첫 재시도 실패에서 멈추므로 대기 목록 전체가 막힌다.
+_SELF_SENT_SIGNAL_RETURNCODES = frozenset(
+    {-signal.SIGTERM, -signal.SIGINT, -signal.SIGHUP}
+)
+
+# 자식을 띄우지 않고 거절했다는 표식. 실제로 실행된 적이 없으므로 "시그널에
+# 끊겼다"고 기록하면 로그가 사실과 달라진다.
+_SHUTDOWN_REFUSAL_STDERR = "not started: shutdown in progress"
+
+
+def _signal_child_group(process: subprocess.Popen[str], sig: int) -> None:
+    """자식이 속한 프로세스 그룹 전체에 시그널을 보낸다.
+
+    rsync 는 ssh 를 포크하고 그 손자가 부모의 파이프를 물려받는다. 직접 자식만
+    끊으면 communicate 가 EOF 를 받지 못해 상한까지 매달리므로 그룹째 끊는다.
+    시그널 핸들러에서도 불리니 어떤 예외도 밖으로 내보내지 않는다.
+    """
+    try:
+        pgid = os.getpgid(process.pid)
+    except OSError:
+        # 자식이 이미 사라졌거나(ProcessLookupError) 권한 밖이면
+        # (PermissionError) 그룹을 알 수 없다. 직접 자식만이라도 끊어 본다.
+        _signal_child(process, sig)
+        return
+
+    try:
+        os.killpg(pgid, sig)
+    except OSError:
+        # 그룹이 이미 사라졌거나 권한 밖이다. 직접 자식만 다시 시도한다.
+        _signal_child(process, sig)
+
+
+def _signal_child(process: subprocess.Popen[str], sig: int) -> None:
+    """직접 자식에게만 시그널을 보낸다(그룹 경로가 실패했을 때의 대비책)."""
+    try:
+        process.send_signal(sig)
+    except OSError:
+        # 이미 끝난 자식이다. 정지 요청이 실패로 번지게 두지 않는다.
+        return
+
+
 Runner = Callable[[list[str], int], "subprocess.CompletedProcess[str]"]
 
 
@@ -53,8 +97,14 @@ class _ChildGuard:
                 return None
 
         # 락을 쥔 채로 띄우지 않는다. spawn 이 끝날 때까지 정지 요청이 밀린다.
+        # start_new_session 으로 자체 프로세스 그룹을 준다. 그래야 자식이 포크한
+        # 손자까지 한 번에 끊을 수 있고, 우리 그룹에 시그널이 되돌아오지 않는다.
         process = subprocess.Popen(
-            args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
         )
 
         with self._lock:
@@ -63,7 +113,7 @@ class _ChildGuard:
 
         # spawn 도중에 지나간 정지 요청은 이 자식을 보지 못했으므로 여기서 끊는다
         if stopped:
-            process.terminate()
+            _signal_child_group(process, signal.SIGTERM)
 
         return process
 
@@ -80,7 +130,7 @@ class _ChildGuard:
             process = self._process
 
         if process is not None:
-            process.terminate()
+            _signal_child_group(process, signal.SIGTERM)
 
     def reset(self) -> None:
         """정지 상태를 되돌린다."""
@@ -117,19 +167,34 @@ def run_command(args: list[str], timeout: int) -> subprocess.CompletedProcess[st
     process = _child_guard.start(args)
     if process is None:
         return subprocess.CompletedProcess(
-            args=args, returncode=_SIGNALLED_RETURNCODE, stdout="", stderr=""
+            args=args,
+            returncode=_SIGNALLED_RETURNCODE,
+            stdout="",
+            stderr=_SHUTDOWN_REFUSAL_STDERR,
         )
 
-    try:
-        stdout, stderr = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
-        process.kill()
-        stdout, stderr = process.communicate()
-        raise subprocess.TimeoutExpired(
-            args, timeout, output=stdout, stderr=stderr
-        ) from exc
-    finally:
-        _child_guard.clear(process)
+    # subprocess.run 과 같이 with 로 감싼다. 예외가 나든 아니든 파이프를 닫고
+    # 자식을 거두는 일을 빠뜨리지 않기 위함이다.
+    with process:
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            # 손자가 파이프를 쥐고 있으면 두 번째 communicate 도 막힌다. 그룹째
+            # 죽여야 EOF 가 온다.
+            _signal_child_group(process, signal.SIGKILL)
+            stdout, stderr = process.communicate()
+            raise subprocess.TimeoutExpired(
+                args, timeout, output=stdout, stderr=stderr
+            ) from exc
+        except BaseException:
+            # 넓게 잡는 것이 맞는 자리다. subprocess.run 도 똑같이 한다. 좁은
+            # 예외만 잡으면 KeyboardInterrupt·SystemExit 로 빠져나갈 때 자식이
+            # 살아남고, 등록은 아래 finally 에서 지워지므로 아무도 손댈 수 없는
+            # 고아가 된다. 곧바로 다시 던지므로 예외를 삼키지 않는다.
+            _signal_child_group(process, signal.SIGKILL)
+            raise
+        finally:
+            _child_guard.clear(process)
 
     return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
 
@@ -178,6 +243,19 @@ def build_mkdir_args(remote: RemoteConfig, label: str) -> list[str]:
     ]
 
 
+def _interrupted_message(
+    step: str, label: str, result: subprocess.CompletedProcess[str]
+) -> str:
+    """우리가 끊었거나 아예 띄우지 않은 명령의 사유를 문장으로 만든다."""
+    if result.stderr == _SHUTDOWN_REFUSAL_STDERR:
+        return f"{step} was not started for label {label}, shutdown in progress"
+
+    return (
+        f"{step} was killed by our own signal for label {label} "
+        f"(exit {result.returncode})"
+    )
+
+
 def upload(
     remote: RemoteConfig,
     label: str,
@@ -200,11 +278,10 @@ def upload(
         # launchd 는 최소 PATH 만 넘기므로 ssh·rsync 를 못 찾을 수 있다
         raise UploadError(f"cannot run ssh: {exc.strerror}") from exc
 
-    if mkdir.returncode < 0:
-        raise RetryableUploadError(
-            f"ssh mkdir was killed by a signal for label {label} "
-            f"(exit {mkdir.returncode})"
-        )
+    # 우리가 끊은 것만 되살린다. 다른 음수는 자식이 스스로 깨진 것이므로 아래
+    # 영구 실패 경로로 내려가 폐기된다.
+    if mkdir.returncode in _SELF_SENT_SIGNAL_RETURNCODES:
+        raise RetryableUploadError(_interrupted_message("ssh mkdir", label, mkdir))
     if mkdir.returncode == 255:
         raise RetryableUploadError(
             f"ssh connection failed for label {label} (exit 255)"
@@ -229,12 +306,17 @@ def upload(
         logger.info("Uploaded %s under label %s", path, label)
         return
 
+    # 종료 중에 우리가 끊은 전송은 폐기하지 않고 대기 목록에 남겨 다음 실행에
+    # 다시 올린다. SIGSEGV 처럼 rsync 가 스스로 깨진 경우는 여기 해당하지 않는다.
+    if result.returncode in _SELF_SENT_SIGNAL_RETURNCODES:
+        raise RetryableUploadError(
+            _interrupted_message(f"rsync for {path}", label, result)
+        )
+
     stderr = (result.stderr or "").strip()[:_STDERR_LOG_LIMIT]
     message = (
         f"rsync failed for {path} (label {label}, exit {result.returncode}): {stderr}"
     )
-    # 음수는 시그널로 끊겼다는 뜻이다. 종료 중에 우리가 끊은 것이므로 폐기하지
-    # 않고 대기 목록에 남겨 다음 실행에 다시 올린다.
-    if result.returncode < 0 or result.returncode in RETRYABLE_EXIT_CODES:
+    if result.returncode in RETRYABLE_EXIT_CODES:
         raise RetryableUploadError(message)
     raise UploadError(message)

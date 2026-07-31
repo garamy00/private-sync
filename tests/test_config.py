@@ -243,9 +243,14 @@ sources:
     assert conf.sources[0].paths == (real_dir.resolve(),)
 
 
-def test_agent_config_rejects_symlink_loop_path(tmp_path):
-    # 심볼릭 루프에서 Path.resolve()는 RuntimeError를 던진다.
-    # ConfigError로 변환하지 않으면 daemon의 예외 처리 범위를 벗어나 죽는다.
+def test_agent_config_rejects_symlink_loop_path_as_nonexistent(tmp_path):
+    """심볼릭 루프 경로가 데몬을 죽이지 않고 ConfigError 로 걸러지는지 확인한다.
+
+    실제로 걸리는 지점은 resolve() 가 아니라 그 앞의 존재 확인이다. 순환 링크는
+    따라갈 수 없으니 Path.exists() 가 이미 False 를 돌려주기 때문이다. 어느
+    검사가 잡든 데몬이 죽지 않는 것이 요점이므로, 실제로 나오는 메시지를 그대로
+    확인해 커버리지를 가진 척하지 않는다.
+    """
     loop_a = tmp_path / "loop_a"
     loop_b = tmp_path / "loop_b"
     loop_a.symlink_to(loop_b)
@@ -264,7 +269,7 @@ sources:
 """,
     )
 
-    with pytest.raises(ConfigError):
+    with pytest.raises(ConfigError, match="path does not exist"):
         load_agent_config(cfg)
 
 

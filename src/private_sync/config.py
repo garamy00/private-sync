@@ -107,6 +107,9 @@ def _build_source(raw: dict) -> Source:
             raise ConfigError(f"source {label!r} path does not exist: {path}")
         # watchdog은 실제 경로(realpath)로 이벤트를 보고하므로, 심볼릭 링크를
         # 거치는 설정 경로도 미리 resolve해 저장해야 이벤트와 계속 매칭된다
+        # 순환 링크는 위 존재 확인에서 이미 걸린다. 이 처리는 그 사이에 링크가
+        # 바뀌는 TOCTOU 대비다. 또한 Python 3.13+ 의 resolve() 는 순환에도
+        # RuntimeError 를 던지지 않으므로 이 갈래는 언젠가 죽은 코드가 된다.
         try:
             path = path.resolve()
         except RuntimeError as exc:

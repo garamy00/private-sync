@@ -1,4 +1,6 @@
+import os
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -26,6 +28,11 @@ _SLOW_CHILD = [sys.executable, "-c", "import time; time.sleep(30)"]
 _CHILD_TIMEOUT_SEC = 25
 _CUT_DEADLINE_SEC = 5.0
 
+# 손자를 남기고 부모만 먼저 빠지는 자식이다. 백그라운드 sleep 이 부모의 stderr
+# 파이프를 물려받으므로, 부모만 끊어서는 EOF 가 오지 않는다. 운영에서 rsync 가
+# 포크한 ssh 가 하는 일과 같다. 셸은 테스트 발판일 뿐 운영 코드가 아니다.
+_GRANDCHILD_PARENT = ["/bin/sh", "-c", "sleep 30 & wait"]
+
 
 @pytest.fixture(autouse=True)
 def _fresh_command_guard():
@@ -42,6 +49,14 @@ def _ok(_args, _timeout):
 def _killed(args):
     # 시그널로 끊긴 자식은 음수 반환 코드를 남긴다(SIGTERM 이면 -15)
     return subprocess.CompletedProcess(args=args, returncode=-15, stdout="", stderr="")
+
+
+def _kill_leftover(pid):
+    """회귀 시 살아남은 자식이 테스트를 넘어 떠돌지 않게 정리한다."""
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        return
 
 
 def _failing(code, stderr=""):
@@ -245,6 +260,130 @@ def test_command_started_after_terminate_does_not_run():
 
     assert time.monotonic() - begin < _CUT_DEADLINE_SEC
     assert result.returncode < 0
+
+
+def test_terminate_cuts_a_child_that_left_a_grandchild_holding_the_pipe():
+    """손자가 파이프를 쥐고 있어도 종료 요청이 곧바로 먹혀야 한다.
+
+    실제로 신고된 경로다. rsync 는 ssh 를 포크하고 그 ssh 가 rsync 의 stderr
+    파이프를 물려받는다. 직접 자식만 끊으면 communicate 는 EOF 를 받지 못해
+    파이썬 쪽 상한까지 매달린다. 프로세스 그룹째 끊어야 풀린다.
+    """
+    started = threading.Event()
+    outcome: dict[str, object] = {}
+
+    def call_run_command() -> None:
+        started.set()
+        begin = time.monotonic()
+        try:
+            outcome["result"] = run_command(_GRANDCHILD_PARENT, _CHILD_TIMEOUT_SEC)
+        except subprocess.TimeoutExpired:
+            # 회귀하면 상한까지 매달린다. 통째로 멎지 않고 실패로 끝내려고 잡는다.
+            outcome["timed_out"] = True
+        outcome["elapsed"] = time.monotonic() - begin
+
+    caller = threading.Thread(target=call_run_command, daemon=True)
+    caller.start()
+    assert started.wait(_CUT_DEADLINE_SEC)
+    # 손자까지 실제로 떠서 파이프를 물고 있는 상태를 끊는다
+    time.sleep(0.5)
+
+    terminate_running_command()
+    caller.join(_CHILD_TIMEOUT_SEC + 15)
+
+    assert not caller.is_alive(), "run_command did not return after terminate"
+    assert not outcome.get("timed_out"), "run_command hung until its own timeout"
+    assert outcome["elapsed"] < _CUT_DEADLINE_SEC
+
+
+def test_child_does_not_survive_an_exception_between_spawn_and_reap(monkeypatch):
+    """대기 중에 예외가 터져도 자식을 남기지 않아야 한다.
+
+    등록만 지우고 자식을 살려 두면 terminate_running_command 조차 닿지 못하는
+    고아가 된다. 로그아웃한 뒤에도 전송이 계속 도는 상황이 여기서 생긴다.
+    """
+    spawned: list[subprocess.Popen] = []
+
+    class ExplodingPopen(subprocess.Popen):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            spawned.append(self)
+
+        def communicate(self, *args, **kwargs):
+            raise MemoryError("forced failure between spawn and reap")
+
+    monkeypatch.setattr(subprocess, "Popen", ExplodingPopen)
+
+    with pytest.raises(MemoryError):
+        run_command(_SLOW_CHILD, _CHILD_TIMEOUT_SEC)
+
+    assert len(spawned) == 1
+    pid = spawned[0].pid
+    try:
+        # 살아 있으면 os.kill 이 통과한다. ps 문자열을 훑지 않고 직접 확인한다.
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+    finally:
+        _kill_leftover(pid)
+
+
+def test_segfaulted_rsync_is_permanent_not_retryable():
+    """스스로 깨진 자식은 재시도 대상이 아니다.
+
+    drain 은 첫 RetryableUploadError 에서 멈춘다. 매번 SIGSEGV 로 죽는 항목을
+    재시도 대상으로 분류하면 그 하나가 대기 목록 전체를 영영 붙잡는다.
+    """
+
+    def runner(args, timeout):
+        if args[0] == "ssh":
+            return _ok(args, timeout)
+        return subprocess.CompletedProcess(
+            args=args, returncode=-11, stdout="", stderr=""
+        )
+
+    with pytest.raises(UploadError) as excinfo:
+        upload(REMOTE, "메모", Path("/Users/me/a.md"), (), runner=runner)
+
+    assert not isinstance(excinfo.value, RetryableUploadError)
+
+
+def test_segfaulted_ssh_mkdir_is_permanent_not_retryable():
+    """mkdir 단계가 스스로 깨진 경우도 폐기 경로로 가야 한다."""
+
+    def runner(args, _timeout):
+        return subprocess.CompletedProcess(
+            args=args, returncode=-11, stdout="", stderr=""
+        )
+
+    with pytest.raises(UploadError) as excinfo:
+        upload(REMOTE, "메모", Path("/Users/me/a.md"), (), runner=runner)
+
+    assert not isinstance(excinfo.value, RetryableUploadError)
+
+
+def test_sigterm_killed_rsync_stays_retryable():
+    """우리가 보낸 SIGTERM 으로 끊긴 전송은 그대로 재시도 대상이다."""
+
+    def runner(args, timeout):
+        if args[0] == "ssh":
+            return _ok(args, timeout)
+        return _killed(args)
+
+    with pytest.raises(RetryableUploadError):
+        upload(REMOTE, "메모", Path("/Users/me/a.md"), (), runner=runner)
+
+
+def test_upload_refused_during_shutdown_says_the_command_never_started():
+    """거절된 명령을 "시그널에 끊겼다"고 적으면 로그가 사실과 다르다."""
+    terminate_running_command()
+
+    with pytest.raises(RetryableUploadError) as excinfo:
+        upload(REMOTE, "메모", Path("/Users/me/a.md"), ())
+
+    message = str(excinfo.value)
+    assert "not started" in message
+    assert "shutdown" in message
+    assert "killed by a signal" not in message
 
 
 def test_built_rsync_args_actually_work_with_the_real_rsync_binary(tmp_path):

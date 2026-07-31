@@ -1,5 +1,6 @@
 import logging
 import os
+import sys
 import threading
 import time
 from pathlib import Path
@@ -14,9 +15,15 @@ from private_sync.agent.main import (
     _EventHandler,
     _reload_config,
     _run_loop,
+    main,
     queue_initial_sync,
 )
 from private_sync.agent.pending import PendingItem, PendingStore
+from private_sync.agent.uploader import (
+    reset_command_guard,
+    run_command,
+    terminate_running_command,
+)
 from private_sync.agent.watcher import Debouncer, build_targets
 from private_sync.config import AgentConfig, RemoteConfig, Source, load_agent_config
 from private_sync.errors import RetryableUploadError, UploadError
@@ -508,3 +515,21 @@ def test_reregistration_failure_stops_the_daemon(tmp_path, caplog):
     assert not loop.is_alive()
     assert state.stop.is_set()
     assert "Cannot re-register watches" in caplog.text
+
+
+def test_main_resets_the_command_guard_at_startup(tmp_path):
+    """이전 실행이 남긴 정지 상태가 새 실행을 막지 않아야 한다.
+
+    가드는 모듈 전역이라 프로세스 안에 계속 남는다. main 이 초기화하지 않으면
+    같은 프로세스에서 다시 시작했을 때 모든 명령이 조용히 거절된다.
+    """
+    terminate_running_command()
+    try:
+        # 설정 파일이 없어 곧바로 끝나지만, 그 전에 가드가 풀려야 한다
+        assert main(["--config", str(tmp_path / "없음.yaml")]) == 1
+
+        result = run_command([sys.executable, "-c", "pass"], timeout=30)
+
+        assert result.returncode == 0
+    finally:
+        reset_command_guard()
