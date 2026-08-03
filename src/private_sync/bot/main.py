@@ -246,7 +246,15 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("Configuration error: %s", exc)
         return 1
 
-    client = TelegramClient(config.token)
+    client = TelegramClient(config.token, api_base=config.api_base)
+    try:
+        client.get_me()
+    except TelegramError as exc:
+        # 로컬 API 서버를 쓰는 경우 그것이 죽어 있으면 봇이 통째로 먹통이 된다.
+        # 조용히 도는 것보다 시작 시 분명히 멈추는 편이 낫다.
+        logger.critical("Cannot reach the Telegram API at %s: %s", config.api_base, exc)
+        return 1
+
     try:
         _serve(client, config)
     except KeyboardInterrupt:

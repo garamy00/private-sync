@@ -18,7 +18,7 @@ from private_sync.errors import TelegramError
 # getUpdates 롱폴링 대기(초). 이 값만큼 봇 응답이 늦어질 수 있다.
 LONG_POLL_SEC = 20
 
-_API = "https://api.telegram.org/bot{token}/{method}"
+_DEFAULT_API_BASE = "https://api.telegram.org"
 _POST_TIMEOUT_SEC = 30
 _UPLOAD_TIMEOUT_SEC = 300
 
@@ -74,13 +74,19 @@ def build_keyboard(buttons: tuple[tuple[str, str], ...]) -> str | None:
 class TelegramClient:
     """Bot API 호출을 담당한다."""
 
-    def __init__(self, token: str, session: requests.Session | None = None) -> None:
+    def __init__(
+        self,
+        token: str,
+        session: requests.Session | None = None,
+        api_base: str = _DEFAULT_API_BASE,
+    ) -> None:
         self._token = token
         self._session = session or requests.Session()
+        self._api_base = api_base
 
     def _url(self, method: str) -> str:
         """메서드 호출 URL을 만든다. 이 문자열은 어떤 예외·로그에도 넣지 않는다."""
-        return _API.format(token=self._token, method=method)
+        return f"{self._api_base}/bot{self._token}/{method}"
 
     def get_updates(self, offset: int | None) -> list[dict]:
         """롱폴링으로 새 update 목록을 가져온다.
@@ -96,6 +102,18 @@ class TelegramClient:
         result = response.get("result")
         if not isinstance(result, list):
             raise TelegramError("getUpdates returned unexpected payload")
+        return result
+
+    def get_me(self) -> dict:
+        """봇 자신의 정보를 가져온다. 시작 시 API 도달 확인에 쓴다.
+
+        Raises:
+            TelegramError: 네트워크 오류 또는 비정상 응답.
+        """
+        response = self._get("getMe", {}, _POST_TIMEOUT_SEC)
+        result = response.get("result")
+        if not isinstance(result, dict):
+            raise TelegramError("getMe returned unexpected payload")
         return result
 
     def send_message(

@@ -127,3 +127,30 @@ def test_send_document_opens_file_and_posts(tmp_path):
     _, url, data = session.calls[0]
     assert url.endswith("/sendDocument")
     assert data["caption"] == "a"
+
+
+def test_default_base_builds_the_public_url():
+    session = _FakeSession()
+    client = TelegramClient("tok", session=session)
+
+    client.get_updates(offset=None)
+
+    _, url, _ = session.calls[0]
+    assert url == "https://api.telegram.org/bottok/getUpdates"
+
+
+def test_custom_base_is_used_verbatim():
+    session = _FakeSession()
+    client = TelegramClient("tok", session=session, api_base="http://127.0.0.1:8081")
+
+    client.get_updates(offset=None)
+
+    _, url, _ = session.calls[0]
+    assert url == "http://127.0.0.1:8081/bottok/getUpdates"
+
+
+def test_get_me_returns_the_result_payload():
+    session = _FakeSession(_FakeResponse({"ok": True, "result": {"username": "mybot"}}))
+    client = TelegramClient("tok", session=session)
+
+    assert client.get_me() == {"username": "mybot"}

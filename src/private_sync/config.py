@@ -51,6 +51,8 @@ class BotConfig:
     token: str
     chat_id: str
     zip_password: str
+    api_base: str
+    max_part_bytes: int
 
 
 def normalize_remote_store(raw: str) -> str:
@@ -193,9 +195,19 @@ def load_bot_config(path: Path, env: Mapping[str, str] | None = None) -> BotConf
     if missing:
         raise ConfigError(f"missing environment variables: {', '.join(missing)}")
 
+    api_base = env.get("PRIVATE_SYNC_API_BASE", "https://api.telegram.org").rstrip("/")
+
+    raw_part_mb = env.get("PRIVATE_SYNC_MAX_PART_MB", "45")
+    if not raw_part_mb.isdigit() or int(raw_part_mb) <= 0:
+        raise ConfigError(
+            f"PRIVATE_SYNC_MAX_PART_MB must be a positive integer, got {raw_part_mb!r}"
+        )
+
     return BotConfig(
         store=store,
         token=secrets["PRIVATE_SYNC_BOT_TOKEN"],
         chat_id=secrets["PRIVATE_SYNC_CHAT_ID"],
         zip_password=secrets["PRIVATE_SYNC_ZIP_PASSWORD"],
+        api_base=api_base,
+        max_part_bytes=int(raw_part_mb) * 1024 * 1024,
     )

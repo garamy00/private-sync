@@ -145,6 +145,25 @@ PRIVATE_SYNC_ZIP_PASSWORD=...
 EOF
 ```
 
+### 로컬 Bot API 서버 (선택)
+
+표준 공개 API(`api.telegram.org`)만 쓸 거라면 이 절은 건너뛰어도 된다. 기본값이
+바로 그 공개 API다.
+
+공개 API는 봇 파일 업로드를 50MB로 제한한다. 그 한도를 올리려면 텔레그램이
+공식으로 제공하는 로컬 Bot API 서버(`telegram-bot-api`)를 직접 띄우고,
+`bot.env`에 `PRIVATE_SYNC_API_BASE`로 그 주소를 지정한다(예:
+`PRIVATE_SYNC_API_BASE=http://127.0.0.1:8081`). 분할 업로드 단위도
+`PRIVATE_SYNC_MAX_PART_MB`로 함께 조정한다.
+
+로컬 서버를 띄우려면 `api_id`/`api_hash`가 필요하며, 이는 `my.telegram.org`에서
+발급받는다. 이것은 `@BotFather`가 주는 봇 토큰과는 다른 종류의 비밀값이므로 별도로
+안전하게 보관해야 한다.
+
+로컬 서버가 죽어 있으면 봇 프로세스도 시작하지 못한다(시작 시 `getMe`로 도달
+가능 여부를 확인하고, 실패하면 즉시 종료한다). 로컬 서버를 systemd 등으로 함께
+관리해 봇보다 먼저 뜨고 늦게 죽도록 구성할 것.
+
 ```bash
 # 세션이 끊겨도 user systemd 인스턴스가 살아 있어야 봇이 계속 떠 있다.
 # enable-linger 없이 등록하면 SSH 연결이 끊기는 순간 봇도 함께 죽는다.

@@ -67,7 +67,14 @@ def config(tmp_path):
     store = tmp_path / "store"
     (store / "메모").mkdir(parents=True)
     (store / "메모" / "a.txt").write_bytes(b"hello")
-    return BotConfig(store=store, token="tok", chat_id="123", zip_password="pw")
+    return BotConfig(
+        store=store,
+        token="tok",
+        chat_id="123",
+        zip_password="pw",
+        api_base="https://api.telegram.org",
+        max_part_bytes=45 * 1024 * 1024,
+    )
 
 
 def _callback(text="tok"):

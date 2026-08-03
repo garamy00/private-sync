@@ -280,3 +280,60 @@ def test_bot_config_reports_all_missing_env_vars(tmp_path):
 
     with pytest.raises(ConfigError, match="PRIVATE_SYNC_ZIP_PASSWORD"):
         load_bot_config(cfg, env={"PRIVATE_SYNC_BOT_TOKEN": "tok"})
+
+
+def test_bot_config_defaults_to_the_public_api(tmp_path):
+    store = tmp_path / "store"
+    store.mkdir()
+    cfg = _write(tmp_path / "bot.yaml", f"store: {store}\n")
+
+    conf = load_bot_config(
+        cfg,
+        env={
+            "PRIVATE_SYNC_BOT_TOKEN": "tok",
+            "PRIVATE_SYNC_CHAT_ID": "123",
+            "PRIVATE_SYNC_ZIP_PASSWORD": "pw",
+        },
+    )
+
+    # 미설정이면 지금과 동일하게 동작해야 한다
+    assert conf.api_base == "https://api.telegram.org"
+    assert conf.max_part_bytes == 45 * 1024 * 1024
+
+
+def test_bot_config_reads_local_api_settings(tmp_path):
+    store = tmp_path / "store"
+    store.mkdir()
+    cfg = _write(tmp_path / "bot.yaml", f"store: {store}\n")
+
+    conf = load_bot_config(
+        cfg,
+        env={
+            "PRIVATE_SYNC_BOT_TOKEN": "tok",
+            "PRIVATE_SYNC_CHAT_ID": "123",
+            "PRIVATE_SYNC_ZIP_PASSWORD": "pw",
+            "PRIVATE_SYNC_API_BASE": "http://127.0.0.1:8081/",
+            "PRIVATE_SYNC_MAX_PART_MB": "1900",
+        },
+    )
+
+    # 끝의 슬래시는 URL 조립에서 중복되므로 떼어둔다
+    assert conf.api_base == "http://127.0.0.1:8081"
+    assert conf.max_part_bytes == 1900 * 1024 * 1024
+
+
+def test_bot_config_rejects_non_numeric_part_size(tmp_path):
+    store = tmp_path / "store"
+    store.mkdir()
+    cfg = _write(tmp_path / "bot.yaml", f"store: {store}\n")
+
+    with pytest.raises(ConfigError, match="PRIVATE_SYNC_MAX_PART_MB"):
+        load_bot_config(
+            cfg,
+            env={
+                "PRIVATE_SYNC_BOT_TOKEN": "tok",
+                "PRIVATE_SYNC_CHAT_ID": "123",
+                "PRIVATE_SYNC_ZIP_PASSWORD": "pw",
+                "PRIVATE_SYNC_MAX_PART_MB": "많이",
+            },
+        )
