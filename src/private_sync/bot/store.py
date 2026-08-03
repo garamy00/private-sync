@@ -153,7 +153,8 @@ def directory_stats(root: Path, rel: str) -> DirStats:
                 continue
             total += path.stat().st_size
         except OSError:
-            logger.warning("Skipping unreadable entry while sizing %s", rel)
+            # rel 은 호출 내내 같은 값이라 어느 항목이 실패했는지 알 수 없다
+            logger.warning("Skipping unreadable entry %s while sizing %s", path, rel)
             continue
         files += 1
 
