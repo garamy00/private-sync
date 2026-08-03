@@ -48,6 +48,10 @@ _PARTIAL_SEND_MESSAGE = (
     "전송이 {total}개 중 {sent}개 파트에서 끊겼습니다.\n"
     "이미 받은 파트는 지우고 처음부터 다시 받아주세요."
 )
+_DELIVERY_FAILED_MESSAGE = (
+    "목록을 표시할 수 없습니다. 항목이 너무 많거나 일시적인 오류입니다.\n"
+    "/find <키워드> 로 찾아보세요."
+)
 
 
 class Deliverer:
@@ -91,6 +95,9 @@ class Deliverer:
             self._client.send_message(self._config.chat_id, action.text, action.buttons)
         except TelegramError as exc:
             logger.error("Failed to deliver text response: %s", exc)
+            # 침묵하면 사용자에게는 버튼이 죽은 것으로 보인다. notify 는 자체적으로
+            # TelegramError 를 삼키므로 여기서 다시 감싸지 않는다.
+            self.notify(_DELIVERY_FAILED_MESSAGE)
 
     def notify(self, text: str) -> None:
         """사용자에게 짧은 안내를 보낸다."""

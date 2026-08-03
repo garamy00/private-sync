@@ -24,11 +24,13 @@ class _SpyClient:
         self._fail_on = fail_on
 
     def send_message(self, chat_id, text, buttons=()):
-        if self._fail_on == "message":
+        if self._fail_on in ("message", "all"):
             raise TelegramError("sendMessage returned status 500")
         self.messages.append((chat_id, text, buttons))
 
     def edit_message_text(self, chat_id, message_id, text, buttons=()):
+        if self._fail_on in ("edit", "all"):
+            raise TelegramError("editMessageText returned status 400")
         self.edits.append((chat_id, message_id, text, buttons))
 
     def send_document(self, chat_id, path, caption=""):
@@ -211,6 +213,29 @@ def test_answer_callback_failure_does_not_abort_delivery(config):
 
     # 로딩 표시 해제 실패는 전달을 막지 않는다
     assert len(client.documents) == 1
+
+
+def test_failed_edit_tells_the_user_instead_of_going_silent(config):
+    client = _SpyClient(fail_on="edit")
+
+    Deliverer(client, config).run(
+        SendText(text="목록", buttons=(("A", "t"),), edit=True), _callback()
+    )
+
+    # 로그만 남기면 폰에서는 "눌러도 아무 반응 없음" 으로 보인다
+    assert client.messages
+    assert "표시할 수 없습니다" in client.messages[-1][1]
+
+
+def test_failure_notice_that_also_fails_stays_quiet(config):
+    client = _SpyClient(fail_on="all")
+
+    # 알림마저 실패해도 예외가 밖으로 나오면 안 된다
+    Deliverer(client, config).run(
+        SendText(text="목록", buttons=(("A", "t"),), edit=True), _callback()
+    )
+
+    assert client.messages == []
 
 
 def _start_update():
