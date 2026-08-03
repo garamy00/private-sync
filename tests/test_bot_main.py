@@ -1,4 +1,5 @@
 import logging
+import os
 from pathlib import Path
 
 import pytest
@@ -121,6 +122,30 @@ def test_send_file_delivers_encrypted_zip(config):
     assert chat_id == "123"
     assert name == "a.txt.zip"
     assert "a.txt" in caption
+
+
+def test_send_file_splits_when_source_exceeds_configured_max_part_bytes(tmp_path):
+    # config 픽스처의 max_part_bytes 는 건드리지 않는다. 여기서만 작은 한도를
+    # 준 별도 BotConfig 로, 배선이 끊기면(패커 기본값 45MB 로 되돌아가면)
+    # 이 작은 파일은 절대 나뉘지 않는다는 사실로 회귀를 잡는다.
+    store = tmp_path / "store"
+    (store / "메모").mkdir(parents=True)
+    # 무작위 바이트라 압축해도 줄지 않으므로 분할 여부가 max_part_bytes 에만 달렸다
+    (store / "메모" / "big.bin").write_bytes(os.urandom(200 * 1024))
+    small_part_config = BotConfig(
+        store=store,
+        token="tok",
+        chat_id="123",
+        zip_password="pw",
+        api_base="https://api.telegram.org",
+        max_part_bytes=64 * 1024,
+    )
+    client = _SpyClient()
+    deliverer = Deliverer(client, small_part_config)
+
+    deliverer.run(SendFile(rel="메모/big.bin", caption="big.bin"), _callback())
+
+    assert len(client.documents) > 1
 
 
 def test_send_file_cleans_up_temp_files(config, monkeypatch):

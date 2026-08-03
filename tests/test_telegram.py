@@ -31,7 +31,7 @@ class _FakeSession:
         return self._response
 
     def post(self, url, data=None, files=None, timeout=None):
-        self.calls.append(("post", url, data))
+        self.calls.append(("post", url, data, files))
         if self._exc:
             raise self._exc
         return self._response
@@ -70,7 +70,7 @@ def test_send_message_includes_keyboard():
 
     client.send_message("123", "hello", buttons=(("A", "t1"),))
 
-    _, url, data = session.calls[0]
+    _, url, data, _ = session.calls[0]
     assert url.endswith("/sendMessage")
     assert data["chat_id"] == "123"
     assert json.loads(data["reply_markup"])["inline_keyboard"]
@@ -124,7 +124,7 @@ def test_send_document_opens_file_and_posts(tmp_path):
 
     client.send_document("123", document, caption="a")
 
-    _, url, data = session.calls[0]
+    _, url, data, _ = session.calls[0]
     assert url.endswith("/sendDocument")
     assert data["caption"] == "a"
 
@@ -164,8 +164,11 @@ def test_public_api_uploads_the_file_body(tmp_path):
 
     client.send_document("123", document, caption="a")
 
-    _, _, data = session.calls[0]
+    _, _, data, files = session.calls[0]
     assert "document" not in data
+    # multipart 분기가 실제로 파일을 첨부하는지 확인한다 (data 검사만으로는
+    # files= 첨부가 통째로 빠져도 잡히지 않는다)
+    assert files["document"][0] == document.name
 
 
 def test_local_api_sends_the_path_instead_of_the_body(tmp_path):
@@ -176,9 +179,10 @@ def test_local_api_sends_the_path_instead_of_the_body(tmp_path):
 
     client.send_document("123", document, caption="a")
 
-    _, _, data = session.calls[0]
+    _, _, data, files = session.calls[0]
     # 같은 장비이므로 본문을 HTTP 로 밀어 넣을 이유가 없다
     assert data["document"] == f"file://{document}"
+    assert files is None
 
 
 def test_local_api_upload_does_not_open_the_file(tmp_path):
