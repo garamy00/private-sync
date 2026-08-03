@@ -54,7 +54,6 @@ def _many(count):
 def test_large_directory_is_split_into_pages():
     ctx = _ctx(listing={"음악": _many(45)})
 
-    action = handle(_message("/start"), ctx)
     first = handle(
         Incoming(
             kind="callback",
@@ -72,7 +71,6 @@ def test_large_directory_is_split_into_pages():
     assert "1/3" in labels
     assert "다음 ▶" in labels
     assert "◀ 이전" not in labels
-    assert action is not None
 
 
 def test_middle_page_has_both_arrows_and_parent():
@@ -151,13 +149,12 @@ def test_exact_multiple_of_page_size_has_no_empty_page():
 
 
 def test_small_directory_has_no_pager():
-    ctx = _ctx()
-
     action = handle(_message("/start"), _ctx())
 
     labels = [label for label, _ in action.buttons]
-    assert not any("/" in label and label[0].isdigit() for label in labels)
-    assert ctx is not None
+    # 페이지가 하나뿐이면 n/N 표시도 화살표도 없어야 한다
+    assert not any(label[0].isdigit() for label in labels)
+    assert "다음 ▶" not in labels
 
 
 def test_page_number_never_reaches_callback_data():
