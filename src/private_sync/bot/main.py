@@ -16,12 +16,14 @@ from private_sync.bot.handlers import (
     Context,
     Incoming,
     SendFile,
+    SendFolder,
     SendText,
     TokenMap,
     extract,
+    format_size,
     handle,
 )
-from private_sync.bot.packer import pack_for_send
+from private_sync.bot.packer import pack_dir_for_send, pack_for_send
 from private_sync.bot.telegram import TelegramClient
 from private_sync.config import BotConfig, load_bot_config
 from private_sync.errors import (
@@ -52,6 +54,8 @@ _DELIVERY_FAILED_MESSAGE = (
     "목록을 표시할 수 없습니다. 항목이 너무 많거나 일시적인 오류입니다.\n"
     "/find <키워드> 로 찾아보세요."
 )
+_DISK_HEADROOM = 1.1
+_NO_SPACE_MESSAGE = "서버에 압축할 공간이 부족합니다. 관리자에게 문의하세요."
 
 
 class Deliverer:
@@ -71,6 +75,9 @@ class Deliverer:
 
         if isinstance(action, SendText):
             self._send_text(action, incoming)
+            return
+        if isinstance(action, SendFolder):
+            self._send_folder(action, incoming)
             return
 
         self._send_file(action, incoming)
@@ -149,6 +156,70 @@ class Deliverer:
                 self.notify("파일 전송에 실패했습니다. 다시 시도해 주세요.")
         finally:
             # 평문·암호문 임시 파일을 남기지 않는다
+            shutil.rmtree(workdir, ignore_errors=True)
+
+    def _progress(self, incoming: Incoming, text: str) -> None:
+        """같은 메시지를 고쳐 진행 상황을 알린다. 새 메시지를 쌓지 않는다."""
+        if incoming.message_id is None:
+            self.notify(text)
+            return
+        try:
+            self._client.edit_message_text(
+                self._config.chat_id, incoming.message_id, text
+            )
+        except TelegramError as exc:
+            logger.warning("Progress update failed: %s", exc)
+
+    def _send_folder(self, action: SendFolder, incoming: Incoming) -> None:
+        """폴더를 압축해 보낸다. 진행 상황을 메시지로 갱신한다."""
+        try:
+            source = store.resolve_safe(self._config.store, action.rel)
+            stats = store.directory_stats(self._config.store, action.rel)
+        except StoreError as exc:
+            logger.warning("Rejected folder request %r: %s", action.rel, exc)
+            self.notify(_MISSING_FILE_MESSAGE)
+            return
+
+        workdir = Path(tempfile.mkdtemp(prefix="private-sync-"))
+        sent = 0
+        try:
+            if shutil.disk_usage(workdir).free < stats.total_bytes * _DISK_HEADROOM:
+                logger.error("Not enough disk space to pack %s", action.rel)
+                self.notify(_NO_SPACE_MESSAGE)
+                return
+
+            self._progress(incoming, f"압축 중… ({format_size(stats.total_bytes)})")
+            parts = pack_dir_for_send(
+                source, workdir, self._config.zip_password, self._config.max_part_bytes
+            )
+
+            self._progress(incoming, f"전송 중… (파트 {len(parts)}개)")
+            for part in parts:
+                self._client.send_document(
+                    self._config.chat_id, part, caption=part.name
+                )
+                sent += 1
+
+            if len(parts) > 1:
+                archive = source.name + ".zip"
+                self.notify(_SPLIT_NOTICE.format(count=len(parts), archive=archive))
+            self._progress(incoming, f"완료 ({format_size(stats.total_bytes)})")
+            logger.info("Delivered folder %s as %d part(s)", action.rel, len(parts))
+        except PackError as exc:
+            logger.error("Packing failed for folder %s: %s", action.rel, exc)
+            self.notify("폴더를 포장하는 중 오류가 발생했습니다.")
+        except (TelegramError, OSError) as exc:
+            logger.error(
+                "Sending failed for folder %s after %d part(s): %s",
+                action.rel,
+                sent,
+                type(exc).__name__,
+            )
+            if sent:
+                self.notify(_PARTIAL_SEND_MESSAGE.format(sent=sent, total=len(parts)))
+            else:
+                self.notify("파일 전송에 실패했습니다. 다시 시도해 주세요.")
+        finally:
             shutil.rmtree(workdir, ignore_errors=True)
 
 

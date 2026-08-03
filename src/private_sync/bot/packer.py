@@ -99,3 +99,59 @@ def pack_for_send(
     if archive.stat().st_size <= max_bytes:
         return [archive]
     return split_file(archive, max_bytes)
+
+
+def _make_encrypted_dir_zip(src_dir: Path, dest_dir: Path, password: str) -> Path:
+    """디렉토리 하위 전체를 AES-256 암호 ZIP으로 포장한다.
+
+    아카이브 안의 경로는 대상 디렉토리 이름부터 시작하므로, 풀면 폴더 하나가
+    통째로 나온다.
+
+    Raises:
+        PackError: 읽기·쓰기에 실패했을 때.
+    """
+    archive = dest_dir / (src_dir.name + ".zip")
+    try:
+        with pyzipper.AESZipFile(
+            archive,
+            "w",
+            compression=pyzipper.ZIP_DEFLATED,
+            encryption=pyzipper.WZ_AES,
+        ) as zf:
+            zf.setpassword(password.encode("utf-8"))
+            for path in sorted(src_dir.rglob("*")):
+                if path.is_file():
+                    zf.write(
+                        path,
+                        arcname=str(Path(src_dir.name) / path.relative_to(src_dir)),
+                    )
+    except OSError as exc:
+        archive.unlink(missing_ok=True)
+        raise PackError(
+            f"cannot read or write while packing {src_dir.name}: {exc.strerror}"
+        ) from exc
+
+    logger.info(
+        "Packed directory %s into %d bytes", src_dir.name, archive.stat().st_size
+    )
+    return archive
+
+
+def pack_dir_for_send(
+    src_dir: Path,
+    dest_dir: Path,
+    password: str,
+    max_bytes: int = MAX_PART_BYTES,
+) -> list[Path]:
+    """폴더를 압축해 전송할 파일 목록을 만든다.
+
+    Raises:
+        PackError: 대상이 디렉토리가 아니거나 포장에 실패했을 때.
+    """
+    if not src_dir.is_dir():
+        raise PackError(f"source {src_dir.name} is not a directory")
+
+    archive = _make_encrypted_dir_zip(src_dir, dest_dir, password)
+    if archive.stat().st_size <= max_bytes:
+        return [archive]
+    return split_file(archive, max_bytes)

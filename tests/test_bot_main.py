@@ -1,5 +1,6 @@
 import logging
 import os
+from collections import namedtuple
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,7 @@ from private_sync.bot.handlers import (
     Context,
     Incoming,
     SendFile,
+    SendFolder,
     SendText,
     TokenMap,
 )
@@ -421,3 +423,59 @@ def test_malformed_update_entry_does_not_break_the_poll_loop(config):
     # 기형 항목을 건너뛰고 정상 update 까지 처리했으며, offset 도 전진했다
     assert client.messages, "정상 update 가 처리되지 않았다"
     assert client.offsets == [None, 8]
+
+
+def test_folder_download_reports_progress_and_sends(config):
+    (config.store / "메모" / "하위").mkdir(parents=True, exist_ok=True)
+    (config.store / "메모" / "하위" / "b.txt").write_bytes(b"bb")
+    client = _SpyClient()
+
+    Deliverer(client, config).run(SendFolder(rel="메모"), _callback())
+
+    assert len(client.documents) == 1
+    progress = [text for _chat, message_id, text, _b in client.edits]
+    assert any("압축 중" in text for text in progress)
+    assert any("전송 중" in text for text in progress)
+    assert any("완료" in text for text in progress)
+
+
+def test_folder_download_refuses_when_disk_is_short(config, monkeypatch):
+    import private_sync.bot.main as bot_main
+
+    # shutil._ntuple_diskusage 는 private API 다. 필요한 필드만 흉내낸다.
+    Usage = namedtuple("Usage", "total used free")
+
+    def tiny_disk(_path):
+        return Usage(total=100, used=99, free=1)
+
+    monkeypatch.setattr(bot_main.shutil, "disk_usage", tiny_disk)
+    client = _SpyClient()
+
+    Deliverer(client, config).run(SendFolder(rel="메모"), _callback())
+
+    assert client.documents == []
+    assert "공간" in client.messages[-1][1]
+
+
+def test_folder_download_cleans_up_on_pack_failure(config, monkeypatch):
+    import private_sync.bot.main as bot_main
+
+    created = []
+    original = bot_main.tempfile.mkdtemp
+
+    def tracking_mkdtemp(*args, **kwargs):
+        path = original(*args, **kwargs)
+        created.append(Path(path))
+        return path
+
+    def exploding_pack(*_args, **_kwargs):
+        raise PackError("cannot read source directory")
+
+    monkeypatch.setattr(bot_main.tempfile, "mkdtemp", tracking_mkdtemp)
+    monkeypatch.setattr(bot_main, "pack_dir_for_send", exploding_pack)
+    client = _SpyClient()
+
+    Deliverer(client, config).run(SendFolder(rel="메모"), _callback())
+
+    assert created and not created[0].exists()
+    assert "포장" in client.messages[-1][1]
