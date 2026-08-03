@@ -327,13 +327,15 @@ def test_bot_config_rejects_non_numeric_part_size(tmp_path):
     store.mkdir()
     cfg = _write(tmp_path / "bot.yaml", f"store: {store}\n")
 
-    with pytest.raises(ConfigError, match="PRIVATE_SYNC_MAX_PART_MB"):
-        load_bot_config(
-            cfg,
-            env={
-                "PRIVATE_SYNC_BOT_TOKEN": "tok",
-                "PRIVATE_SYNC_CHAT_ID": "123",
-                "PRIVATE_SYNC_ZIP_PASSWORD": "pw",
-                "PRIVATE_SYNC_MAX_PART_MB": "많이",
-            },
-        )
+    # "②" 는 str.isdigit() 이 True 지만 int() 가 거부한다. 0 과 음수도 함께 본다.
+    for bad in ("많이", "②", "0", "-5"):
+        with pytest.raises(ConfigError, match="PRIVATE_SYNC_MAX_PART_MB"):
+            load_bot_config(
+                cfg,
+                env={
+                    "PRIVATE_SYNC_BOT_TOKEN": "tok",
+                    "PRIVATE_SYNC_CHAT_ID": "123",
+                    "PRIVATE_SYNC_ZIP_PASSWORD": "pw",
+                    "PRIVATE_SYNC_MAX_PART_MB": bad,
+                },
+            )

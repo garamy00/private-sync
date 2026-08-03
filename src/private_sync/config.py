@@ -171,7 +171,8 @@ def load_bot_config(path: Path, env: Mapping[str, str] | None = None) -> BotConf
     """서버 bot 설정을 읽고 비밀값은 환경변수에서 가져온다.
 
     Raises:
-        ConfigError: store 누락·부재 또는 환경변수 누락.
+        ConfigError: store 누락·부재, 환경변수 누락, 또는 분할 단위가 양의
+            정수가 아닐 때.
     """
     env = os.environ if env is None else env
     data = _read_yaml(path)
@@ -197,8 +198,15 @@ def load_bot_config(path: Path, env: Mapping[str, str] | None = None) -> BotConf
 
     api_base = env.get("PRIVATE_SYNC_API_BASE", "https://api.telegram.org").rstrip("/")
 
+    # str.isdigit() 은 "②" 같은 유니코드 숫자에도 True 라 int() 가 뒤에서 터진다.
+    # 시작 경로는 ConfigError 만 잡으므로 그대로 두면 트레이스백과 함께 죽는다.
     raw_part_mb = env.get("PRIVATE_SYNC_MAX_PART_MB", "45")
-    if not raw_part_mb.isdigit() or int(raw_part_mb) <= 0:
+    try:
+        part_mb = int(raw_part_mb)
+    except ValueError:
+        part_mb = 0
+
+    if part_mb <= 0:
         raise ConfigError(
             f"PRIVATE_SYNC_MAX_PART_MB must be a positive integer, got {raw_part_mb!r}"
         )
@@ -209,5 +217,5 @@ def load_bot_config(path: Path, env: Mapping[str, str] | None = None) -> BotConf
         chat_id=secrets["PRIVATE_SYNC_CHAT_ID"],
         zip_password=secrets["PRIVATE_SYNC_ZIP_PASSWORD"],
         api_base=api_base,
-        max_part_bytes=int(raw_part_mb) * 1024 * 1024,
+        max_part_bytes=part_mb * 1024 * 1024,
     )
