@@ -21,7 +21,7 @@ WORK_DOCS = [
 ]
 
 
-def _ctx(chat_id="123", listing=None, results=None, stats=None):
+def _ctx(chat_id="123", listing=None, results=None, stats=None, max_part_bytes=None):
     tree = {"": ROOT, "업무 문서": WORK_DOCS} if listing is None else listing
     return Context(
         chat_id=chat_id,
@@ -29,6 +29,7 @@ def _ctx(chat_id="123", listing=None, results=None, stats=None):
         lister=lambda rel: tree.get(rel, []),
         searcher=lambda kw: results or [],
         stats=stats or (lambda rel: DirStats(files=3, total_bytes=1024)),
+        max_part_bytes=max_part_bytes or 50 * 1024 * 1024,
     )
 
 
@@ -291,7 +292,13 @@ def test_directory_view_offers_a_folder_download():
         ctx,
     )
 
-    assert any(label.startswith("📦") for label, _ in action.buttons)
+    # 라벨만 보면 그 버튼이 dir 토큰을 물고 있어도(확인 화면을 건너뛰어도)
+    # 통과한다. 실제로 zipask 로 이어지는지까지 확인해야 배선이 끊긴 걸 잡는다.
+    zip_tokens = [data for label, data in action.buttons if label.startswith("📦")]
+    assert len(zip_tokens) == 1
+    kind, rel, _page = ctx.tokens.get(zip_tokens[0])
+    assert kind == "zipask"
+    assert rel == "업무 문서"
 
 
 def test_root_view_has_no_folder_download():
@@ -302,7 +309,10 @@ def test_root_view_has_no_folder_download():
 
 
 def test_folder_download_asks_before_starting():
-    ctx = _ctx(stats=lambda rel: DirStats(files=100, total_bytes=843 * 1024 * 1024))
+    ctx = _ctx(
+        stats=lambda rel: DirStats(files=100, total_bytes=843 * 1024 * 1024),
+        max_part_bytes=50 * 1024 * 1024,
+    )
 
     action = handle(
         Incoming(
@@ -318,6 +328,9 @@ def test_folder_download_asks_before_starting():
     assert isinstance(action, SendText)
     assert "843.0 MB" in action.text
     assert "100" in action.text
+    # ceil(843MB / 50MB) = 17. 실수로 확인 없이 19개짜리 분할 전송을 받는 걸
+    # 막는 게 이 화면의 목적이므로, 스펙이 요구하는 예상 파트 수도 보여야 한다
+    assert "17" in action.text
     labels = [label for label, _ in action.buttons]
     assert "받기" in labels
     assert "취소" in labels
@@ -326,18 +339,46 @@ def test_folder_download_asks_before_starting():
 def test_confirming_starts_the_folder_download():
     ctx = _ctx()
 
+    # 실제 사용자 흐름을 그대로 따라간다: 목록에서 📦 토큰을 얻고, 그 토큰으로
+    # 확인 화면을 받아 받기 토큰을 얻고, 그 토큰을 눌러야 SendFolder 가 나온다.
+    # zipgo 토큰을 직접 만들면 확인 화면이 실제로 그 토큰을 물고 있는지는
+    # 검증되지 않는다.
+    browse = handle(
+        Incoming(
+            kind="callback",
+            chat_id="123",
+            text=ctx.tokens.put("dir", "업무 문서"),
+            message_id=5,
+            callback_id="cb1",
+        ),
+        ctx,
+    )
+    zip_token = next(data for label, data in browse.buttons if label.startswith("📦"))
+
+    confirm = handle(
+        Incoming(
+            kind="callback",
+            chat_id="123",
+            text=zip_token,
+            message_id=5,
+            callback_id="cb2",
+        ),
+        ctx,
+    )
+    go_token = dict(confirm.buttons)["받기"]
+
     action = handle(
         Incoming(
             kind="callback",
             chat_id="123",
-            text=ctx.tokens.put("zipgo", "음악"),
+            text=go_token,
             message_id=5,
-            callback_id="cb",
+            callback_id="cb3",
         ),
         ctx,
     )
 
-    assert action == SendFolder(rel="음악")
+    assert action == SendFolder(rel="업무 문서")
 
 
 def test_cancelling_returns_to_the_listing():
@@ -369,6 +410,10 @@ def test_cancelling_returns_to_the_listing():
 
     assert isinstance(action, SendText)
     assert action.edit is True
+    # edit=True 인 SendText 는 확인 화면도 만든다. 취소가 zipask 로 잘못
+    # 배선돼도 이 두 assert 만으로는 안 걸리므로, 목록(_browse)에서만 나오는
+    # 제목 접두어까지 확인한다 (확인 화면은 "📦" 로 시작한다).
+    assert action.text.startswith("📂")
 
 
 def test_token_map_evicts_oldest_beyond_limit():

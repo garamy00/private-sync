@@ -339,3 +339,81 @@ def test_bot_config_rejects_non_numeric_part_size(tmp_path):
                     "PRIVATE_SYNC_MAX_PART_MB": bad,
                 },
             )
+
+
+def test_bot_config_rejects_part_size_above_the_public_api_limit(tmp_path):
+    store = tmp_path / "store"
+    store.mkdir()
+    cfg = _write(tmp_path / "bot.yaml", f"store: {store}\n")
+
+    # 45 를 450 으로 잘못 입력한 흔한 오타. 걸러지지 않으면 매 sendDocument 가
+    # 413 으로 실패하고 사용자는 이유를 알 수 없다.
+    with pytest.raises(ConfigError, match="PRIVATE_SYNC_MAX_PART_MB"):
+        load_bot_config(
+            cfg,
+            env={
+                "PRIVATE_SYNC_BOT_TOKEN": "tok",
+                "PRIVATE_SYNC_CHAT_ID": "123",
+                "PRIVATE_SYNC_ZIP_PASSWORD": "pw",
+                "PRIVATE_SYNC_MAX_PART_MB": "450",
+            },
+        )
+
+
+def test_bot_config_rejects_part_size_above_the_local_api_limit(tmp_path):
+    store = tmp_path / "store"
+    store.mkdir()
+    cfg = _write(tmp_path / "bot.yaml", f"store: {store}\n")
+
+    # 로컬 서버 문서상 한도는 2000MB 다.
+    with pytest.raises(ConfigError, match="PRIVATE_SYNC_MAX_PART_MB"):
+        load_bot_config(
+            cfg,
+            env={
+                "PRIVATE_SYNC_BOT_TOKEN": "tok",
+                "PRIVATE_SYNC_CHAT_ID": "123",
+                "PRIVATE_SYNC_ZIP_PASSWORD": "pw",
+                "PRIVATE_SYNC_API_BASE": "http://127.0.0.1:8081",
+                "PRIVATE_SYNC_MAX_PART_MB": "2001",
+            },
+        )
+
+
+def test_bot_config_rejects_api_base_with_a_path_component(tmp_path):
+    store = tmp_path / "store"
+    store.mkdir()
+    cfg = _write(tmp_path / "bot.yaml", f"store: {store}\n")
+
+    # PRIVATE_SYNC_API_BASE 라는 이름 때문에 봇 URL 전체
+    # (토큰 포함)를 넣는 실수가 나올 수 있다. 거부하되 값 자체는 메시지에
+    # 담지 않아야 한다 — 담으면 로그에 토큰이 남는다.
+    with pytest.raises(ConfigError) as excinfo:
+        load_bot_config(
+            cfg,
+            env={
+                "PRIVATE_SYNC_BOT_TOKEN": "tok",
+                "PRIVATE_SYNC_CHAT_ID": "123",
+                "PRIVATE_SYNC_ZIP_PASSWORD": "pw",
+                "PRIVATE_SYNC_API_BASE": "https://api.telegram.org/botSECRETTOKEN",
+            },
+        )
+
+    assert "PRIVATE_SYNC_API_BASE" in str(excinfo.value)
+    assert "SECRETTOKEN" not in str(excinfo.value)
+
+
+def test_bot_config_rejects_api_base_without_a_scheme(tmp_path):
+    store = tmp_path / "store"
+    store.mkdir()
+    cfg = _write(tmp_path / "bot.yaml", f"store: {store}\n")
+
+    with pytest.raises(ConfigError, match="PRIVATE_SYNC_API_BASE"):
+        load_bot_config(
+            cfg,
+            env={
+                "PRIVATE_SYNC_BOT_TOKEN": "tok",
+                "PRIVATE_SYNC_CHAT_ID": "123",
+                "PRIVATE_SYNC_ZIP_PASSWORD": "pw",
+                "PRIVATE_SYNC_API_BASE": "api.telegram.org",
+            },
+        )

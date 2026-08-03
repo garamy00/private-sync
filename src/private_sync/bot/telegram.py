@@ -7,6 +7,7 @@ python-telegram-bot 을 쓰지 않고 raw HTTP만 사용한다. 서버가 아웃
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -20,7 +21,18 @@ LONG_POLL_SEC = 20
 
 _DEFAULT_API_BASE = "https://api.telegram.org"
 _POST_TIMEOUT_SEC = 30
-_UPLOAD_TIMEOUT_SEC = 300
+
+# 파트 상한이 45MB 였을 때 정한 값이라 그대로 바닥으로 남긴다. 그보다 짧게는
+# 절대 잡지 않는다.
+_UPLOAD_TIMEOUT_FLOOR_SEC = 300
+# 업로드 대역폭을 1 MB/s(8Mbit/s)로 가정한다. 로컬 API 서버의 file:// 업로드는
+# API 서버가 텔레그램에 다 올릴 때까지 응답하지 않으므로, 파트 크기 전체가 이
+# 타임아웃 하나에 걸린다. 느린 업링크를 기준으로 넉넉히 잡는 편이 안전하다 —
+# 타임아웃이 길면 오류가 늦게 날 뿐이지만, 짧으면 이미 끝난 전송을 실패로
+# 오판해 재포장·재전송을 시킨다.
+_ASSUMED_UPLOAD_BYTES_PER_SEC = 1024 * 1024
+# 기존 호출부·테스트가 그대로 동작하도록 지금까지의 파트 상한(45MB)을 기본값으로 둔다.
+_DEFAULT_MAX_PART_BYTES = 45 * 1024 * 1024
 
 
 class _Response(Protocol):
@@ -85,10 +97,17 @@ class TelegramClient:
         token: str,
         session: requests.Session | None = None,
         api_base: str = _DEFAULT_API_BASE,
+        max_part_bytes: int = _DEFAULT_MAX_PART_BYTES,
     ) -> None:
         self._token = token
         self._session = session or requests.Session()
         self._api_base = api_base
+        # 실제 파트 크기가 아니라 설정된 상한으로 잡는다. 어차피 상한을 넘는
+        # 파트는 만들어지지 않으므로, 매 업로드가 최악의 경우를 견딜 여유를
+        # 갖는다.
+        self._upload_timeout_sec = _UPLOAD_TIMEOUT_FLOOR_SEC + math.ceil(
+            max_part_bytes / _ASSUMED_UPLOAD_BYTES_PER_SEC
+        )
 
     def _url(self, method: str) -> str:
         """메서드 호출 URL을 만든다. 이 문자열은 어떤 예외·로그에도 넣지 않는다."""
@@ -168,7 +187,7 @@ class TelegramClient:
         if self._api_base != _DEFAULT_API_BASE:
             data["document"] = f"file://{path}"
             self._post(
-                "sendDocument", _PostBody(data=data, timeout=_UPLOAD_TIMEOUT_SEC)
+                "sendDocument", _PostBody(data=data, timeout=self._upload_timeout_sec)
             )
             return
 
@@ -179,7 +198,7 @@ class TelegramClient:
                     _PostBody(
                         data=data,
                         files={"document": (path.name, handle)},
-                        timeout=_UPLOAD_TIMEOUT_SEC,
+                        timeout=self._upload_timeout_sec,
                     ),
                 )
         except OSError as exc:

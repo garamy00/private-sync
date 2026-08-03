@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import secrets
 from collections import OrderedDict
 from collections.abc import Callable
@@ -97,6 +98,7 @@ class Context:
     lister: Callable[[str], list[Entry]]
     searcher: Callable[[str], list[Entry]]
     stats: Callable[[str], DirStats]
+    max_part_bytes: int
 
 
 @dataclass(frozen=True)
@@ -214,10 +216,14 @@ def _confirm_folder(ctx: Context, rel: str) -> SendText:
     843MB 짜리 전송을 실수로 시작하면 되돌릴 수 없다.
     """
     stats = ctx.stats(rel)
+    # 원본 바이트 기준 상한이라 실제 파트 수의 상한일 뿐이다. 압축이 되면
+    # 보통 이보다 적게 나가므로 "최대"로 표현해 약속처럼 읽히지 않게 한다.
+    estimated_parts = max(1, math.ceil(stats.total_bytes / ctx.max_part_bytes))
     return SendText(
         text=(
             f"📦 /{rel}\n"
             f"파일 {stats.files}개, {format_size(stats.total_bytes)}\n"
+            f"예상 파트 수 최대 {estimated_parts}개\n"
             "압축해서 보낼까요?"
         ),
         buttons=(

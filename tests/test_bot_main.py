@@ -301,6 +301,7 @@ def test_filesystem_error_while_listing_does_not_kill_the_loop(config):
         lister=exploding_lister,
         searcher=lambda _keyword: [],
         stats=_unused_stats,
+        max_part_bytes=45 * 1024 * 1024,
     )
 
     # 예외가 밖으로 나오면 봇 프로세스가 죽는다
@@ -321,6 +322,7 @@ def test_store_error_while_listing_reports_missing_file(config):
         lister=missing_lister,
         searcher=lambda _keyword: [],
         stats=_unused_stats,
+        max_part_bytes=45 * 1024 * 1024,
     )
 
     _handle_one(_start_update(), context, Deliverer(client, config))
@@ -335,6 +337,7 @@ def _context_with_lister(lister, tokens=None):
         lister=lister,
         searcher=lambda _keyword: [],
         stats=_unused_stats,
+        max_part_bytes=45 * 1024 * 1024,
     )
 
 
@@ -433,10 +436,58 @@ def test_folder_download_reports_progress_and_sends(config):
     Deliverer(client, config).run(SendFolder(rel="메모"), _callback())
 
     assert len(client.documents) == 1
-    progress = [text for _chat, message_id, text, _b in client.edits]
-    assert any("압축 중" in text for text in progress)
-    assert any("전송 중" in text for text in progress)
-    assert any("완료" in text for text in progress)
+    # 순서와 버튼을 함께 본다. 세 문구가 어느 편집에 어떤 순서로 실려도 통과하는
+    # any() 세 개로는, 첫 편집 하나에 다 몰리거나 순서가 뒤집혀도 잡히지 않는다.
+    # 버튼을 매번 비워서 보내는지도 여기서 함께 확인한다 — 크기 계산 중에도
+    # 받기 버튼이 살아있으면 두 번 눌려 중복 전송된다.
+    edits = [(text, buttons) for _chat, _message_id, text, buttons in client.edits]
+    assert edits == [
+        ("폴더 확인 중…", ()),
+        ("압축 중… (7 B)", ()),
+        ("전송 중… (파트 1개)", ()),
+        ("완료 (7 B)", ()),
+    ]
+
+
+def test_folder_download_corrects_the_progress_message_on_pack_failure(
+    config, monkeypatch
+):
+    import private_sync.bot.main as bot_main
+
+    def exploding_pack(*_args, **_kwargs):
+        raise PackError("cannot read source dir 메모")
+
+    monkeypatch.setattr(bot_main, "pack_dir_for_send", exploding_pack)
+    client = _SpyClient()
+
+    Deliverer(client, config).run(SendFolder(rel="메모"), _callback())
+
+    # notify 가 상세를 알리지만, 진행 화면이 "압축 중…" 에 멈춰 있으면 사용자는
+    # 여전히 작업이 진행 중이라고 오해한다. 버튼도 이미 지워져 재시도할 수 없다.
+    assert "포장하는 중 오류" in client.messages[-1][1]
+    progress = [text for _chat, _message_id, text, _buttons in client.edits]
+    assert progress[-1] == "압축 실패"
+
+
+def test_folder_download_corrects_the_progress_message_on_send_failure(config):
+    # 두 파트로 쪼개지도록 작은 한도를 준다. 첫 파트는 성공시키고 다음부터
+    # 실패시켜 "전송 중…" 에 멈춘 상태를 재현한다.
+    (config.store / "메모" / "big.bin").write_bytes(os.urandom(9995))
+    small_part_config = BotConfig(
+        store=config.store,
+        token=config.token,
+        chat_id=config.chat_id,
+        zip_password=config.zip_password,
+        api_base=config.api_base,
+        max_part_bytes=2000,
+    )
+    client = _SpyClient(fail_on="document_after_1")
+
+    Deliverer(client, small_part_config).run(SendFolder(rel="메모"), _callback())
+
+    assert "끊겼습니다" in client.messages[-1][1]
+    progress = [text for _chat, _message_id, text, _buttons in client.edits]
+    assert progress[-1] == "전송 실패"
 
 
 def test_folder_download_refuses_when_disk_is_short(config, monkeypatch):

@@ -21,17 +21,20 @@ class _FakeResponse:
 class _FakeSession:
     def __init__(self, response=None, exc=None):
         self.calls = []
+        self.timeouts = []
         self._response = response or _FakeResponse()
         self._exc = exc
 
     def get(self, url, params=None, timeout=None):
         self.calls.append(("get", url, params))
+        self.timeouts.append(timeout)
         if self._exc:
             raise self._exc
         return self._response
 
     def post(self, url, data=None, files=None, timeout=None):
         self.calls.append(("post", url, data, files))
+        self.timeouts.append(timeout)
         if self._exc:
             raise self._exc
         return self._response
@@ -218,3 +221,28 @@ def test_local_api_upload_does_not_open_the_file(tmp_path):
     client.send_document("123", missing, caption="a")
 
     assert session.calls
+
+
+def test_upload_timeout_grows_with_the_configured_part_size(tmp_path):
+    # 로컬 API 서버는 file:// 업로드가 텔레그램에 다 올라갈 때까지 응답하지
+    # 않는다. 파트 상한이 1900MB 로 커지면 고정 300초로는 완료된 전송도
+    # ReadTimeout 으로 오판한다.
+    document = tmp_path / "a.zip"
+    document.write_bytes(b"zip")
+    session = _FakeSession()
+    client = TelegramClient("tok", session=session, max_part_bytes=1900 * 1024 * 1024)
+
+    client.send_document("123", document, caption="a")
+
+    assert session.timeouts[0] > 300
+
+
+def test_upload_timeout_never_drops_below_the_previous_floor(tmp_path):
+    document = tmp_path / "a.zip"
+    document.write_bytes(b"zip")
+    session = _FakeSession()
+    client = TelegramClient("tok", session=session, max_part_bytes=1024)
+
+    client.send_document("123", document, caption="a")
+
+    assert session.timeouts[0] >= 300

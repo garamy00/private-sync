@@ -61,6 +61,9 @@ _DISK_HEADROOM = 1.1
 # 두 배로 쓴다.
 _SPLIT_DISK_HEADROOM = _DISK_HEADROOM * 2
 _NO_SPACE_MESSAGE = "서버에 압축할 공간이 부족합니다. 관리자에게 문의하세요."
+_CHECKING_FOLDER_MESSAGE = "폴더 확인 중…"
+_PACK_FAILED_PROGRESS = "압축 실패"
+_SEND_FAILED_PROGRESS = "전송 실패"
 
 
 class Deliverer:
@@ -177,6 +180,10 @@ class Deliverer:
 
     def _send_folder(self, action: SendFolder, incoming: Incoming) -> None:
         """폴더를 압축해 보낸다. 진행 상황을 메시지로 갱신한다."""
+        # directory_stats 가 큰 폴더에서 수 초 걸릴 수 있는데, 그동안 받기
+        # 버튼이 눌린 채로 남아 있으면 두 번 눌려 같은 폴더가 중복 전송된다.
+        # 크기 계산 전에 먼저 편집해 버튼부터 지운다.
+        self._progress(incoming, _CHECKING_FOLDER_MESSAGE)
         try:
             source = store.resolve_safe(self._config.store, action.rel)
             stats = store.directory_stats(self._config.store, action.rel)
@@ -220,6 +227,9 @@ class Deliverer:
             logger.info("Delivered folder %s as %d part(s)", action.rel, len(parts))
         except PackError as exc:
             logger.error("Packing failed for folder %s: %s", action.rel, exc)
+            # notify 가 상세 안내를 맡으므로, 여기서는 진행 화면이 "압축 중…" 에
+            # 멈춰 작업이 진행 중인 것처럼 보이지 않게만 고친다.
+            self._progress(incoming, _PACK_FAILED_PROGRESS)
             self.notify("폴더를 포장하는 중 오류가 발생했습니다.")
         except (TelegramError, OSError) as exc:
             logger.error(
@@ -228,6 +238,7 @@ class Deliverer:
                 sent,
                 type(exc).__name__,
             )
+            self._progress(incoming, _SEND_FAILED_PROGRESS)
             if sent:
                 self.notify(_PARTIAL_SEND_MESSAGE.format(sent=sent, total=len(parts)))
             else:
@@ -244,6 +255,7 @@ def _build_context(config: BotConfig, tokens: TokenMap) -> Context:
         lister=lambda rel: store.list_dir(config.store, rel),
         searcher=lambda keyword: store.search(config.store, keyword),
         stats=lambda rel: store.directory_stats(config.store, rel),
+        max_part_bytes=config.max_part_bytes,
     )
 
 
@@ -333,7 +345,9 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("Configuration error: %s", exc)
         return 1
 
-    client = TelegramClient(config.token, api_base=config.api_base)
+    client = TelegramClient(
+        config.token, api_base=config.api_base, max_part_bytes=config.max_part_bytes
+    )
     try:
         client.get_me()
     except TelegramError as exc:
