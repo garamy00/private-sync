@@ -21,6 +21,14 @@ class Entry:
     size: int
 
 
+@dataclass(frozen=True)
+class DirStats:
+    """디렉토리 하나의 크기 요약."""
+
+    files: int
+    total_bytes: int
+
+
 def _is_inside(base: Path, candidate: Path) -> bool:
     """이미 resolve된 후보 경로가 저장소 루트 안(또는 루트 자신)인지 판단한다.
 
@@ -119,6 +127,37 @@ def search(root: Path, keyword: str, limit: int = 50) -> list[Entry]:
     if truncated:
         logger.info("Search for %r truncated at %d results", keyword, limit)
     return results
+
+
+def directory_stats(root: Path, rel: str) -> DirStats:
+    """디렉토리 하위의 파일 수와 총 바이트를 센다.
+
+    저장소 밖으로 풀리는 심볼릭 링크와 상태를 읽을 수 없는 항목은 제외한다.
+    목록·검색과 같은 규칙이라 확인 화면의 숫자와 실제 전송 내용이 어긋나지 않는다.
+
+    Raises:
+        StoreError: 경로가 루트를 벗어나거나 디렉토리가 아닐 때.
+    """
+    base = root.resolve()
+    target = resolve_safe(root, rel)
+    if not target.is_dir():
+        raise StoreError(f"path {rel!r} is not a directory")
+
+    files = 0
+    total = 0
+    for path in target.rglob("*"):
+        if not _resolves_inside(base, path):
+            continue
+        try:
+            if not path.is_file():
+                continue
+            total += path.stat().st_size
+        except OSError:
+            logger.warning("Skipping unreadable entry while sizing %s", rel)
+            continue
+        files += 1
+
+    return DirStats(files=files, total_bytes=total)
 
 
 def parent_rel(rel: str) -> str | None:

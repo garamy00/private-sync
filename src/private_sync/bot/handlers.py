@@ -12,7 +12,7 @@ from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from private_sync.bot.store import Entry, parent_rel
+from private_sync.bot.store import DirStats, Entry, parent_rel
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +78,14 @@ class SendFile:
     caption: str
 
 
-Action = SendText | SendFile | None
+@dataclass(frozen=True)
+class SendFolder:
+    """폴더를 통째로 압축해 보내라는 지시."""
+
+    rel: str
+
+
+Action = SendText | SendFile | SendFolder | None
 
 
 @dataclass
@@ -89,6 +96,7 @@ class Context:
     tokens: TokenMap
     lister: Callable[[str], list[Entry]]
     searcher: Callable[[str], list[Entry]]
+    stats: Callable[[str], DirStats]
 
 
 @dataclass(frozen=True)
@@ -184,6 +192,9 @@ def _browse(ctx: Context, view: BrowseView) -> SendText:
     if parent is not None:
         # 몇 페이지에 있든 되돌아갈 수 있어야 한다
         buttons.append(("⬆️ 상위", ctx.tokens.put("dir", parent)))
+    if view.rel:
+        # 저장소 전체를 통째로 받는 것은 의도한 동작이 아니므로 루트에서는 넣지 않는다
+        buttons.append(("📦 이 폴더 통째로 받기", ctx.tokens.put("zipask", view.rel)))
 
     buttons += [
         _entry_button(entry, ctx.tokens)
@@ -195,6 +206,26 @@ def _browse(ctx: Context, view: BrowseView) -> SendText:
     if not entries:
         title = f"{title}\n(비어 있습니다)"
     return SendText(text=title, buttons=tuple(buttons), edit=view.edit)
+
+
+def _confirm_folder(ctx: Context, rel: str) -> SendText:
+    """폴더 압축 전에 크기를 보여주고 확인을 받는다.
+
+    843MB 짜리 전송을 실수로 시작하면 되돌릴 수 없다.
+    """
+    stats = ctx.stats(rel)
+    return SendText(
+        text=(
+            f"📦 /{rel}\n"
+            f"파일 {stats.files}개, {format_size(stats.total_bytes)}\n"
+            "압축해서 보낼까요?"
+        ),
+        buttons=(
+            ("받기", ctx.tokens.put("zipgo", rel)),
+            ("취소", ctx.tokens.put("dir", rel)),
+        ),
+        edit=True,
+    )
 
 
 def _find(keyword: str, ctx: Context) -> SendText:
@@ -237,6 +268,10 @@ def _handle_callback(incoming: Incoming, ctx: Context) -> Action:
     kind, rel, page = resolved
     if kind == "dir":
         return _browse(ctx, BrowseView(rel=rel, page=page, edit=True))
+    if kind == "zipask":
+        return _confirm_folder(ctx, rel)
+    if kind == "zipgo":
+        return SendFolder(rel=rel)
     return SendFile(rel=rel, caption=rel.rsplit("/", 1)[-1])
 
 

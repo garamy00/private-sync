@@ -159,6 +159,7 @@ def _build_context(config: BotConfig, tokens: TokenMap) -> Context:
         tokens=tokens,
         lister=lambda rel: store.list_dir(config.store, rel),
         searcher=lambda keyword: store.search(config.store, keyword),
+        stats=lambda rel: store.directory_stats(config.store, rel),
     )
 
 

@@ -12,8 +12,14 @@ from private_sync.bot.handlers import (
     TokenMap,
 )
 from private_sync.bot.main import Deliverer, _handle_one, _serve, main
+from private_sync.bot.store import DirStats
 from private_sync.config import BotConfig
 from private_sync.errors import PackError, StoreError, TelegramError
+
+
+def _unused_stats(_rel):
+    """이 파일의 테스트들은 폴더 크기 조회를 실행하지 않으므로 값은 무의미하다."""
+    return DirStats(files=0, total_bytes=0)
 
 
 class _SpyClient:
@@ -292,6 +298,7 @@ def test_filesystem_error_while_listing_does_not_kill_the_loop(config):
         tokens=TokenMap(),
         lister=exploding_lister,
         searcher=lambda _keyword: [],
+        stats=_unused_stats,
     )
 
     # 예외가 밖으로 나오면 봇 프로세스가 죽는다
@@ -311,6 +318,7 @@ def test_store_error_while_listing_reports_missing_file(config):
         tokens=TokenMap(),
         lister=missing_lister,
         searcher=lambda _keyword: [],
+        stats=_unused_stats,
     )
 
     _handle_one(_start_update(), context, Deliverer(client, config))
@@ -324,6 +332,7 @@ def _context_with_lister(lister, tokens=None):
         tokens=tokens or TokenMap(),
         lister=lister,
         searcher=lambda _keyword: [],
+        stats=_unused_stats,
     )
 
 

@@ -3,12 +3,13 @@ from private_sync.bot.handlers import (
     Context,
     Incoming,
     SendFile,
+    SendFolder,
     SendText,
     TokenMap,
     extract,
     handle,
 )
-from private_sync.bot.store import Entry
+from private_sync.bot.store import DirStats, Entry
 
 ROOT = [
     Entry(name="업무 문서", rel="업무 문서", is_dir=True, size=0),
@@ -20,13 +21,14 @@ WORK_DOCS = [
 ]
 
 
-def _ctx(chat_id="123", listing=None, results=None):
+def _ctx(chat_id="123", listing=None, results=None, stats=None):
     tree = {"": ROOT, "업무 문서": WORK_DOCS} if listing is None else listing
     return Context(
         chat_id=chat_id,
         tokens=TokenMap(),
         lister=lambda rel: tree.get(rel, []),
         searcher=lambda kw: results or [],
+        stats=stats or (lambda rel: DirStats(files=3, total_bytes=1024)),
     )
 
 
@@ -273,6 +275,100 @@ def test_page_number_never_reaches_callback_data():
     for _label, data in action.buttons:
         assert "음악" not in data
         assert data.isascii()
+
+
+def test_directory_view_offers_a_folder_download():
+    ctx = _ctx()
+
+    action = handle(
+        Incoming(
+            kind="callback",
+            chat_id="123",
+            text=ctx.tokens.put("dir", "업무 문서"),
+            message_id=5,
+            callback_id="cb",
+        ),
+        ctx,
+    )
+
+    assert any(label.startswith("📦") for label, _ in action.buttons)
+
+
+def test_root_view_has_no_folder_download():
+    action = handle(_message("/start"), _ctx())
+
+    # 저장소 전체를 통째로 받는 것은 의도한 동작이 아니다
+    assert not any(label.startswith("📦") for label, _ in action.buttons)
+
+
+def test_folder_download_asks_before_starting():
+    ctx = _ctx(stats=lambda rel: DirStats(files=100, total_bytes=843 * 1024 * 1024))
+
+    action = handle(
+        Incoming(
+            kind="callback",
+            chat_id="123",
+            text=ctx.tokens.put("zipask", "음악"),
+            message_id=5,
+            callback_id="cb",
+        ),
+        ctx,
+    )
+
+    assert isinstance(action, SendText)
+    assert "843.0 MB" in action.text
+    assert "100" in action.text
+    labels = [label for label, _ in action.buttons]
+    assert "받기" in labels
+    assert "취소" in labels
+
+
+def test_confirming_starts_the_folder_download():
+    ctx = _ctx()
+
+    action = handle(
+        Incoming(
+            kind="callback",
+            chat_id="123",
+            text=ctx.tokens.put("zipgo", "음악"),
+            message_id=5,
+            callback_id="cb",
+        ),
+        ctx,
+    )
+
+    assert action == SendFolder(rel="음악")
+
+
+def test_cancelling_returns_to_the_listing():
+    ctx = _ctx()
+
+    # 취소 버튼이 실제로 물고 있는 토큰을 확인 화면에서 뽑아와야 배선이 끊겨도 잡힌다
+    confirm = handle(
+        Incoming(
+            kind="callback",
+            chat_id="123",
+            text=ctx.tokens.put("zipask", "업무 문서"),
+            message_id=5,
+            callback_id="cb1",
+        ),
+        ctx,
+    )
+    cancel_token = dict(confirm.buttons)["취소"]
+
+    action = handle(
+        Incoming(
+            kind="callback",
+            chat_id="123",
+            text=cancel_token,
+            message_id=5,
+            callback_id="cb2",
+        ),
+        ctx,
+    )
+
+    assert isinstance(action, SendText)
+    assert action.edit is True
 
 
 def test_token_map_evicts_oldest_beyond_limit():

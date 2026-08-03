@@ -3,6 +3,8 @@ import logging
 import pytest
 
 from private_sync.bot.store import (
+    DirStats,
+    directory_stats,
     list_dir,
     parent_rel,
     resolve_safe,
@@ -142,6 +144,34 @@ def test_sibling_directory_sharing_name_prefix_is_rejected(store):
     # 문자열 접두사 비교였다면 통과했을 경로다
     with pytest.raises(StoreError, match="outside the store"):
         resolve_safe(store, f"../{evil.name}/leak.txt")
+
+
+def test_directory_stats_counts_files_and_bytes(store):
+    stats = directory_stats(store, "업무 문서")
+
+    # 계약서.docx(1) + sub/회의록.md(1)
+    assert stats.files == 2
+    assert stats.total_bytes == 2
+
+
+def test_directory_stats_skips_escaping_symlinks(store, tmp_path):
+    outside = tmp_path / "big.bin"
+    outside.write_bytes(b"x" * 500)
+    (store / "메모" / "link.bin").symlink_to(outside)
+
+    stats = directory_stats(store, "메모")
+
+    # 저장소 밖 파일은 크기에도 개수에도 들어가면 안 된다
+    assert stats.files == 1
+    assert stats.total_bytes == 1
+
+
+def test_directory_stats_on_empty_directory(store):
+    (store / "빈폴더").mkdir()
+
+    stats = directory_stats(store, "빈폴더")
+
+    assert stats == DirStats(files=0, total_bytes=0)
 
 
 def test_search_does_not_report_truncation_when_results_fit(store, caplog):
