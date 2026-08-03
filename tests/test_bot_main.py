@@ -1,4 +1,6 @@
 import logging
+import os
+from collections import namedtuple
 from pathlib import Path
 
 import pytest
@@ -7,12 +9,19 @@ from private_sync.bot.handlers import (
     Context,
     Incoming,
     SendFile,
+    SendFolder,
     SendText,
     TokenMap,
 )
 from private_sync.bot.main import Deliverer, _handle_one, _serve, main
+from private_sync.bot.store import DirStats
 from private_sync.config import BotConfig
 from private_sync.errors import PackError, StoreError, TelegramError
+
+
+def _unused_stats(_rel):
+    """이 파일의 테스트들은 폴더 크기 조회를 실행하지 않으므로 값은 무의미하다."""
+    return DirStats(files=0, total_bytes=0)
 
 
 class _SpyClient:
@@ -21,14 +30,19 @@ class _SpyClient:
         self.edits = []
         self.documents = []
         self.answered = []
+        self.attempts = []
         self._fail_on = fail_on
 
     def send_message(self, chat_id, text, buttons=()):
-        if self._fail_on == "message":
+        # 실패하더라도 시도했다는 사실은 남긴다
+        self.attempts.append(text)
+        if self._fail_on in ("message", "all"):
             raise TelegramError("sendMessage returned status 500")
         self.messages.append((chat_id, text, buttons))
 
     def edit_message_text(self, chat_id, message_id, text, buttons=()):
+        if self._fail_on in ("edit", "all"):
+            raise TelegramError("editMessageText returned status 400")
         self.edits.append((chat_id, message_id, text, buttons))
 
     def send_document(self, chat_id, path, caption=""):
@@ -62,7 +76,14 @@ def config(tmp_path):
     store = tmp_path / "store"
     (store / "메모").mkdir(parents=True)
     (store / "메모" / "a.txt").write_bytes(b"hello")
-    return BotConfig(store=store, token="tok", chat_id="123", zip_password="pw")
+    return BotConfig(
+        store=store,
+        token="tok",
+        chat_id="123",
+        zip_password="pw",
+        api_base="https://api.telegram.org",
+        max_part_bytes=45 * 1024 * 1024,
+    )
 
 
 def _callback(text="tok"):
@@ -109,6 +130,30 @@ def test_send_file_delivers_encrypted_zip(config):
     assert chat_id == "123"
     assert name == "a.txt.zip"
     assert "a.txt" in caption
+
+
+def test_send_file_splits_when_source_exceeds_configured_max_part_bytes(tmp_path):
+    # config 픽스처의 max_part_bytes 는 건드리지 않는다. 여기서만 작은 한도를
+    # 준 별도 BotConfig 로, 배선이 끊기면(패커 기본값 45MB 로 되돌아가면)
+    # 이 작은 파일은 절대 나뉘지 않는다는 사실로 회귀를 잡는다.
+    store = tmp_path / "store"
+    (store / "메모").mkdir(parents=True)
+    # 무작위 바이트라 압축해도 줄지 않으므로 분할 여부가 max_part_bytes 에만 달렸다
+    (store / "메모" / "big.bin").write_bytes(os.urandom(200 * 1024))
+    small_part_config = BotConfig(
+        store=store,
+        token="tok",
+        chat_id="123",
+        zip_password="pw",
+        api_base="https://api.telegram.org",
+        max_part_bytes=64 * 1024,
+    )
+    client = _SpyClient()
+    deliverer = Deliverer(client, small_part_config)
+
+    deliverer.run(SendFile(rel="메모/big.bin", caption="big.bin"), _callback())
+
+    assert len(client.documents) > 1
 
 
 def test_send_file_cleans_up_temp_files(config, monkeypatch):
@@ -213,6 +258,32 @@ def test_answer_callback_failure_does_not_abort_delivery(config):
     assert len(client.documents) == 1
 
 
+def test_failed_edit_tells_the_user_instead_of_going_silent(config):
+    client = _SpyClient(fail_on="edit")
+
+    Deliverer(client, config).run(
+        SendText(text="목록", buttons=(("A", "t"),), edit=True), _callback()
+    )
+
+    # 로그만 남기면 폰에서는 "눌러도 아무 반응 없음" 으로 보인다
+    assert client.messages
+    assert "표시할 수 없습니다" in client.messages[-1][1]
+
+
+def test_failure_notice_that_also_fails_stays_quiet(config):
+    client = _SpyClient(fail_on="all")
+
+    # 알림마저 실패해도 예외가 밖으로 나오면 안 된다
+    Deliverer(client, config).run(
+        SendText(text="목록", buttons=(("A", "t"),), edit=True), _callback()
+    )
+
+    # 빈 messages 만 보면 "알림을 아예 안 보낸 것" 과 구분되지 않는다.
+    # 시도했는지를 함께 본다.
+    assert client.messages == []
+    assert any("표시할 수 없습니다" in text for text in client.attempts)
+
+
 def _start_update():
     return {"message": {"text": "/start", "chat": {"id": 123}, "message_id": 1}}
 
@@ -229,6 +300,8 @@ def test_filesystem_error_while_listing_does_not_kill_the_loop(config):
         tokens=TokenMap(),
         lister=exploding_lister,
         searcher=lambda _keyword: [],
+        stats=_unused_stats,
+        max_part_bytes=45 * 1024 * 1024,
     )
 
     # 예외가 밖으로 나오면 봇 프로세스가 죽는다
@@ -248,6 +321,8 @@ def test_store_error_while_listing_reports_missing_file(config):
         tokens=TokenMap(),
         lister=missing_lister,
         searcher=lambda _keyword: [],
+        stats=_unused_stats,
+        max_part_bytes=45 * 1024 * 1024,
     )
 
     _handle_one(_start_update(), context, Deliverer(client, config))
@@ -261,6 +336,8 @@ def _context_with_lister(lister, tokens=None):
         tokens=tokens or TokenMap(),
         lister=lister,
         searcher=lambda _keyword: [],
+        stats=_unused_stats,
+        max_part_bytes=45 * 1024 * 1024,
     )
 
 
@@ -349,3 +426,174 @@ def test_malformed_update_entry_does_not_break_the_poll_loop(config):
     # 기형 항목을 건너뛰고 정상 update 까지 처리했으며, offset 도 전진했다
     assert client.messages, "정상 update 가 처리되지 않았다"
     assert client.offsets == [None, 8]
+
+
+def test_folder_download_clears_the_keyboard_before_the_size_walk(config, monkeypatch):
+    import private_sync.bot.main as bot_main
+
+    client = _SpyClient()
+    # directory_stats 호출 시점에 이미 몇 번 편집이 있었는지 기록한다. 편집이
+    # 크기 계산보다 먼저 나가야, 그 사이 받기 버튼이 눌려도 이미 지워진 뒤라
+    # 두 번째 탭이 아무 반응 없이 씹힌다. 순서가 뒤바뀌면(편집이 계산 뒤로
+    # 밀리면) 이 값이 0으로 나온다.
+    edit_count_at_walk = []
+    original_directory_stats = bot_main.store.directory_stats
+
+    def spying_directory_stats(root, rel):
+        edit_count_at_walk.append(len(client.edits))
+        return original_directory_stats(root, rel)
+
+    monkeypatch.setattr(bot_main.store, "directory_stats", spying_directory_stats)
+
+    Deliverer(client, config).run(SendFolder(rel="메모"), _callback())
+
+    assert edit_count_at_walk == [1]
+
+
+def test_folder_download_reports_progress_and_sends(config):
+    (config.store / "메모" / "하위").mkdir(parents=True, exist_ok=True)
+    (config.store / "메모" / "하위" / "b.txt").write_bytes(b"bb")
+    client = _SpyClient()
+
+    Deliverer(client, config).run(SendFolder(rel="메모"), _callback())
+
+    assert len(client.documents) == 1
+    # 순서와 버튼을 함께 본다. 세 문구가 어느 편집에 어떤 순서로 실려도 통과하는
+    # any() 세 개로는, 첫 편집 하나에 다 몰리거나 순서가 뒤집혀도 잡히지 않는다.
+    # 버튼을 매번 비워서 보내는지도 여기서 함께 확인한다 — 크기 계산 중에도
+    # 받기 버튼이 살아있으면 두 번 눌려 중복 전송된다.
+    edits = [(text, buttons) for _chat, _message_id, text, buttons in client.edits]
+    assert edits == [
+        ("폴더 확인 중…", ()),
+        ("압축 중… (7 B)", ()),
+        ("전송 중… (파트 1개)", ()),
+        ("완료 (7 B)", ()),
+    ]
+
+
+def test_folder_download_corrects_the_progress_message_on_pack_failure(
+    config, monkeypatch
+):
+    import private_sync.bot.main as bot_main
+
+    def exploding_pack(*_args, **_kwargs):
+        raise PackError("cannot read source dir 메모")
+
+    monkeypatch.setattr(bot_main, "pack_dir_for_send", exploding_pack)
+    client = _SpyClient()
+
+    Deliverer(client, config).run(SendFolder(rel="메모"), _callback())
+
+    # notify 가 상세를 알리지만, 진행 화면이 "압축 중…" 에 멈춰 있으면 사용자는
+    # 여전히 작업이 진행 중이라고 오해한다. 버튼도 이미 지워져 재시도할 수 없다.
+    assert "포장하는 중 오류" in client.messages[-1][1]
+    progress = [text for _chat, _message_id, text, _buttons in client.edits]
+    assert progress[-1] == "압축 실패"
+
+
+def test_folder_download_corrects_the_progress_message_on_send_failure(config):
+    # 두 파트로 쪼개지도록 작은 한도를 준다. 첫 파트는 성공시키고 다음부터
+    # 실패시켜 "전송 중…" 에 멈춘 상태를 재현한다.
+    (config.store / "메모" / "big.bin").write_bytes(os.urandom(9995))
+    small_part_config = BotConfig(
+        store=config.store,
+        token=config.token,
+        chat_id=config.chat_id,
+        zip_password=config.zip_password,
+        api_base=config.api_base,
+        max_part_bytes=2000,
+    )
+    client = _SpyClient(fail_on="document_after_1")
+
+    Deliverer(client, small_part_config).run(SendFolder(rel="메모"), _callback())
+
+    assert "끊겼습니다" in client.messages[-1][1]
+    progress = [text for _chat, _message_id, text, _buttons in client.edits]
+    assert progress[-1] == "전송 실패"
+
+
+def test_folder_download_refuses_when_disk_is_short(config, monkeypatch):
+    import private_sync.bot.main as bot_main
+
+    # shutil._ntuple_diskusage 는 private API 다. 필요한 필드만 흉내낸다.
+    Usage = namedtuple("Usage", "total used free")
+
+    def tiny_disk(_path):
+        return Usage(total=100, used=99, free=1)
+
+    monkeypatch.setattr(bot_main.shutil, "disk_usage", tiny_disk)
+    client = _SpyClient()
+
+    Deliverer(client, config).run(SendFolder(rel="메모"), _callback())
+
+    assert client.documents == []
+    assert "공간" in client.messages[-1][1]
+    # notify 로 안내는 나갔지만, 항목 6이 추가한 첫 편집("폴더 확인 중…")이 그대로
+    # 남으면 화면은 여전히 확인 중인 것처럼 보이고 받기 버튼도 없는 채로 멈춘다
+    progress = [text for _chat, _message_id, text, _buttons in client.edits]
+    assert progress[-1] == "공간 부족"
+
+
+def test_folder_download_corrects_the_progress_message_when_folder_is_missing(config):
+    client = _SpyClient()
+
+    Deliverer(client, config).run(SendFolder(rel="없는폴더"), _callback())
+
+    assert client.documents == []
+    assert "동기화 대기 중" in client.messages[-1][1]
+    progress = [text for _chat, _message_id, text, _buttons in client.edits]
+    assert progress[-1] == "폴더 없음"
+
+
+def test_folder_download_refuses_when_split_headroom_is_short(config, monkeypatch):
+    import private_sync.bot.main as bot_main
+
+    # 메모/a.txt(5바이트) + big.bin 으로 총 10000바이트를 만들고, max_part_bytes 를
+    # 그보다 작게 잡아 분할이 예상되는 경로를 강제한다.
+    (config.store / "메모" / "big.bin").write_bytes(os.urandom(9995))
+    small_part_config = BotConfig(
+        store=config.store,
+        token=config.token,
+        chat_id=config.chat_id,
+        zip_password=config.zip_password,
+        api_base=config.api_base,
+        max_part_bytes=100,
+    )
+    Usage = namedtuple("Usage", "total used free")
+
+    def just_enough_for_flat_headroom(_path):
+        # 총 바이트의 1.1배(11000)는 채우지만 분할 예약치인 2.2배(22000)는
+        # 못 채우는 여유. 평평한 1.1배 검사로 되돌아가면 이 값을 통과시킨다.
+        return Usage(total=100_000, used=85_000, free=15_000)
+
+    monkeypatch.setattr(bot_main.shutil, "disk_usage", just_enough_for_flat_headroom)
+    client = _SpyClient()
+
+    Deliverer(client, small_part_config).run(SendFolder(rel="메모"), _callback())
+
+    assert client.documents == []
+    assert "공간" in client.messages[-1][1]
+
+
+def test_folder_download_cleans_up_on_pack_failure(config, monkeypatch):
+    import private_sync.bot.main as bot_main
+
+    created = []
+    original = bot_main.tempfile.mkdtemp
+
+    def tracking_mkdtemp(*args, **kwargs):
+        path = original(*args, **kwargs)
+        created.append(Path(path))
+        return path
+
+    def exploding_pack(*_args, **_kwargs):
+        raise PackError("cannot read source directory")
+
+    monkeypatch.setattr(bot_main.tempfile, "mkdtemp", tracking_mkdtemp)
+    monkeypatch.setattr(bot_main, "pack_dir_for_send", exploding_pack)
+    client = _SpyClient()
+
+    Deliverer(client, config).run(SendFolder(rel="메모"), _callback())
+
+    assert created and not created[0].exists()
+    assert "포장" in client.messages[-1][1]

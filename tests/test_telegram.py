@@ -21,17 +21,20 @@ class _FakeResponse:
 class _FakeSession:
     def __init__(self, response=None, exc=None):
         self.calls = []
+        self.timeouts = []
         self._response = response or _FakeResponse()
         self._exc = exc
 
     def get(self, url, params=None, timeout=None):
         self.calls.append(("get", url, params))
+        self.timeouts.append(timeout)
         if self._exc:
             raise self._exc
         return self._response
 
     def post(self, url, data=None, files=None, timeout=None):
-        self.calls.append(("post", url, data))
+        self.calls.append(("post", url, data, files))
+        self.timeouts.append(timeout)
         if self._exc:
             raise self._exc
         return self._response
@@ -70,10 +73,34 @@ def test_send_message_includes_keyboard():
 
     client.send_message("123", "hello", buttons=(("A", "t1"),))
 
-    _, url, data = session.calls[0]
+    _, url, data, _ = session.calls[0]
     assert url.endswith("/sendMessage")
     assert data["chat_id"] == "123"
     assert json.loads(data["reply_markup"])["inline_keyboard"]
+
+
+def test_edit_message_text_includes_keyboard():
+    session = _FakeSession()
+    client = TelegramClient("tok", session=session)
+
+    client.edit_message_text("123", 9, "hi", buttons=(("A", "t1"),))
+
+    _, url, data, _ = session.calls[0]
+    assert url.endswith("/editMessageText")
+    assert json.loads(data["reply_markup"])["inline_keyboard"]
+
+
+def test_edit_message_text_with_no_buttons_clears_the_keyboard():
+    session = _FakeSession()
+    client = TelegramClient("tok", session=session)
+
+    client.edit_message_text("123", 9, "hi")
+
+    _, _, data, _ = session.calls[0]
+    # reply_markup 을 생략하면 텔레그램은 이전 버튼을 그대로 둔다. 빈
+    # inline_keyboard 를 명시해야 실제로 지워진다 — 그렇지 않으면 폴더 전송
+    # 진행 편집 중에도 받기/취소 버튼이 계속 눌린다.
+    assert json.loads(data["reply_markup"]) == {"inline_keyboard": []}
 
 
 def test_network_error_message_omits_token():
@@ -124,6 +151,98 @@ def test_send_document_opens_file_and_posts(tmp_path):
 
     client.send_document("123", document, caption="a")
 
-    _, url, data = session.calls[0]
+    _, url, data, _ = session.calls[0]
     assert url.endswith("/sendDocument")
     assert data["caption"] == "a"
+
+
+def test_default_base_builds_the_public_url():
+    session = _FakeSession()
+    client = TelegramClient("tok", session=session)
+
+    client.get_updates(offset=None)
+
+    _, url, _ = session.calls[0]
+    assert url == "https://api.telegram.org/bottok/getUpdates"
+
+
+def test_custom_base_is_used_verbatim():
+    session = _FakeSession()
+    client = TelegramClient("tok", session=session, api_base="http://127.0.0.1:8081")
+
+    client.get_updates(offset=None)
+
+    _, url, _ = session.calls[0]
+    assert url == "http://127.0.0.1:8081/bottok/getUpdates"
+
+
+def test_get_me_returns_the_result_payload():
+    session = _FakeSession(_FakeResponse({"ok": True, "result": {"username": "mybot"}}))
+    client = TelegramClient("tok", session=session)
+
+    assert client.get_me() == {"username": "mybot"}
+
+
+def test_public_api_uploads_the_file_body(tmp_path):
+    document = tmp_path / "a.zip"
+    document.write_bytes(b"zip")
+    session = _FakeSession()
+    client = TelegramClient("tok", session=session)
+
+    client.send_document("123", document, caption="a")
+
+    _, _, data, files = session.calls[0]
+    assert "document" not in data
+    # multipart 분기가 실제로 파일을 첨부하는지 확인한다 (data 검사만으로는
+    # files= 첨부가 통째로 빠져도 잡히지 않는다)
+    assert files["document"][0] == document.name
+
+
+def test_local_api_sends_the_path_instead_of_the_body(tmp_path):
+    document = tmp_path / "a.zip"
+    document.write_bytes(b"zip")
+    session = _FakeSession()
+    client = TelegramClient("tok", session=session, api_base="http://127.0.0.1:8081")
+
+    client.send_document("123", document, caption="a")
+
+    _, _, data, files = session.calls[0]
+    # 같은 장비이므로 본문을 HTTP 로 밀어 넣을 이유가 없다
+    assert data["document"] == f"file://{document}"
+    assert files is None
+
+
+def test_local_api_upload_does_not_open_the_file(tmp_path):
+    missing = tmp_path / "없는파일.zip"
+    session = _FakeSession()
+    client = TelegramClient("tok", session=session, api_base="http://127.0.0.1:8081")
+
+    # 파일을 읽지 않으므로 존재하지 않아도 요청은 나간다. 판단은 서버가 한다.
+    client.send_document("123", missing, caption="a")
+
+    assert session.calls
+
+
+def test_upload_timeout_grows_with_the_configured_part_size(tmp_path):
+    # 로컬 API 서버는 file:// 업로드가 텔레그램에 다 올라갈 때까지 응답하지
+    # 않는다. 파트 상한이 1900MB 로 커지면 고정 300초로는 완료된 전송도
+    # ReadTimeout 으로 오판한다.
+    document = tmp_path / "a.zip"
+    document.write_bytes(b"zip")
+    session = _FakeSession()
+    client = TelegramClient("tok", session=session, max_part_bytes=1900 * 1024 * 1024)
+
+    client.send_document("123", document, caption="a")
+
+    assert session.timeouts[0] > 300
+
+
+def test_upload_timeout_never_drops_below_the_previous_floor(tmp_path):
+    document = tmp_path / "a.zip"
+    document.write_bytes(b"zip")
+    session = _FakeSession()
+    client = TelegramClient("tok", session=session, max_part_bytes=1024)
+
+    client.send_document("123", document, caption="a")
+
+    assert session.timeouts[0] >= 300

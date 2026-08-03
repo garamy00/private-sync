@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -6,9 +7,11 @@ import pyzipper
 from private_sync.bot.packer import (
     MAX_PART_BYTES,
     make_encrypted_zip,
+    pack_dir_for_send,
     pack_for_send,
     split_file,
 )
+from private_sync.bot.store import directory_stats
 from private_sync.errors import PackError
 
 
@@ -111,3 +114,78 @@ def test_split_file_wraps_unlink_failure_in_pack_error(tmp_path, monkeypatch):
     # 삭제 실패가 raw OSError로 새면 봇 프로세스가 죽는다
     with pytest.raises(PackError, match="cannot split"):
         split_file(target, max_bytes=50)
+
+
+def test_directory_zip_keeps_relative_structure(tmp_path):
+    src = tmp_path / "음악"
+    (src / "하위").mkdir(parents=True)
+    (src / "a.mp3").write_bytes(b"aaa")
+    (src / "하위" / "b.mp3").write_bytes(b"bbb")
+    dest = tmp_path / "out"
+    dest.mkdir()
+
+    parts = pack_dir_for_send(
+        src, dest, password="pw", store_root=tmp_path, max_bytes=1024 * 1024
+    )
+
+    assert len(parts) == 1
+    with pyzipper.AESZipFile(parts[0]) as zf:
+        zf.setpassword(b"pw")
+        assert sorted(zf.namelist()) == ["음악/a.mp3", "음악/하위/b.mp3"]
+        assert zf.read("음악/하위/b.mp3") == b"bbb"
+
+
+def test_directory_zip_splits_when_over_limit(tmp_path):
+    src = tmp_path / "음악"
+    src.mkdir()
+    # os.urandom 은 압축되지 않으므로 아카이브가 512바이트 한도를 확실히 넘는다.
+    # deflate 로 압축되는 반복 패턴을 쓰면 아카이브가 한도 밑으로 줄어 분할이
+    # 일어나지 않을 수 있다.
+    (src / "big.bin").write_bytes(os.urandom(10 * 1024))
+    dest = tmp_path / "out"
+    dest.mkdir()
+
+    parts = pack_dir_for_send(
+        src, dest, password="pw", store_root=tmp_path, max_bytes=512
+    )
+
+    assert len(parts) > 1
+    assert all(p.stat().st_size <= 512 for p in parts)
+
+
+def test_directory_zip_rejects_a_file(tmp_path):
+    src = tmp_path / "a.txt"
+    src.write_bytes(b"a")
+    dest = tmp_path / "out"
+    dest.mkdir()
+
+    with pytest.raises(PackError, match="not a directory"):
+        pack_dir_for_send(src, dest, password="pw", store_root=tmp_path)
+
+
+def test_directory_zip_excludes_symlinks_that_resolve_outside_store(tmp_path):
+    # 확인 화면(directory_stats)이 세지 않은 항목이 실제 아카이브에 들어가면
+    # 사용자가 승인한 범위 밖의 내용이 새 나간다.
+    store_root = tmp_path / "store"
+    src = store_root / "음악"
+    src.mkdir(parents=True)
+    (src / "a.mp3").write_bytes(b"aaa")
+    outside = tmp_path / "outside.mp3"
+    outside.write_bytes(b"secret content from outside the store")
+    (src / "링크.mp3").symlink_to(outside)
+    dest = tmp_path / "out"
+    dest.mkdir()
+
+    stats = directory_stats(store_root, "음악")
+    parts = pack_dir_for_send(
+        src, dest, password="pw", store_root=store_root, max_bytes=1024 * 1024
+    )
+
+    assert len(parts) == 1
+    with pyzipper.AESZipFile(parts[0]) as zf:
+        zf.setpassword(b"pw")
+        names = zf.namelist()
+        assert "음악/링크.mp3" not in names
+        # 두 조건을 함께 봐야 한다. namelist 만 보면 확인 화면 숫자가 실제
+        # 전송분과 우연히 다른 이유로 맞아도 통과해버린다.
+        assert len(names) == stats.files

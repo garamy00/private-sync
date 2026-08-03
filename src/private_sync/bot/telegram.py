@@ -7,6 +7,7 @@ python-telegram-bot 을 쓰지 않고 raw HTTP만 사용한다. 서버가 아웃
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -18,9 +19,20 @@ from private_sync.errors import TelegramError
 # getUpdates 롱폴링 대기(초). 이 값만큼 봇 응답이 늦어질 수 있다.
 LONG_POLL_SEC = 20
 
-_API = "https://api.telegram.org/bot{token}/{method}"
+_DEFAULT_API_BASE = "https://api.telegram.org"
 _POST_TIMEOUT_SEC = 30
-_UPLOAD_TIMEOUT_SEC = 300
+
+# 파트 상한이 45MB 였을 때 정한 값이라 그대로 바닥으로 남긴다. 그보다 짧게는
+# 절대 잡지 않는다.
+_UPLOAD_TIMEOUT_FLOOR_SEC = 300
+# 업로드 대역폭을 1 MB/s(8Mbit/s)로 가정한다. 로컬 API 서버의 file:// 업로드는
+# API 서버가 텔레그램에 다 올릴 때까지 응답하지 않으므로, 파트 크기 전체가 이
+# 타임아웃 하나에 걸린다. 느린 업링크를 기준으로 넉넉히 잡는 편이 안전하다 —
+# 타임아웃이 길면 오류가 늦게 날 뿐이지만, 짧으면 이미 끝난 전송을 실패로
+# 오판해 재포장·재전송을 시킨다.
+_ASSUMED_UPLOAD_BYTES_PER_SEC = 1024 * 1024
+# 기존 호출부·테스트가 그대로 동작하도록 지금까지의 파트 상한(45MB)을 기본값으로 둔다.
+_DEFAULT_MAX_PART_BYTES = 45 * 1024 * 1024
 
 
 class _Response(Protocol):
@@ -71,16 +83,35 @@ def build_keyboard(buttons: tuple[tuple[str, str], ...]) -> str | None:
     return json.dumps({"inline_keyboard": rows}, ensure_ascii=False)
 
 
+# editMessageText 에서 버튼을 실제로 지우려면 빈 inline_keyboard 를 명시해야
+# 한다. build_keyboard 는 sendMessage 쪽 "생략" 의미와 겹치지 않도록 이 값을
+# 따로 반환하지 않는다.
+_EMPTY_KEYBOARD = json.dumps({"inline_keyboard": []})
+
+
 class TelegramClient:
     """Bot API 호출을 담당한다."""
 
-    def __init__(self, token: str, session: requests.Session | None = None) -> None:
+    def __init__(
+        self,
+        token: str,
+        session: requests.Session | None = None,
+        api_base: str = _DEFAULT_API_BASE,
+        max_part_bytes: int = _DEFAULT_MAX_PART_BYTES,
+    ) -> None:
         self._token = token
         self._session = session or requests.Session()
+        self._api_base = api_base
+        # 실제 파트 크기가 아니라 설정된 상한으로 잡는다. 어차피 상한을 넘는
+        # 파트는 만들어지지 않으므로, 매 업로드가 최악의 경우를 견딜 여유를
+        # 갖는다.
+        self._upload_timeout_sec = _UPLOAD_TIMEOUT_FLOOR_SEC + math.ceil(
+            max_part_bytes / _ASSUMED_UPLOAD_BYTES_PER_SEC
+        )
 
     def _url(self, method: str) -> str:
         """메서드 호출 URL을 만든다. 이 문자열은 어떤 예외·로그에도 넣지 않는다."""
-        return _API.format(token=self._token, method=method)
+        return f"{self._api_base}/bot{self._token}/{method}"
 
     def get_updates(self, offset: int | None) -> list[dict]:
         """롱폴링으로 새 update 목록을 가져온다.
@@ -96,6 +127,18 @@ class TelegramClient:
         result = response.get("result")
         if not isinstance(result, list):
             raise TelegramError("getUpdates returned unexpected payload")
+        return result
+
+    def get_me(self) -> dict:
+        """봇 자신의 정보를 가져온다. 시작 시 API 도달 확인에 쓴다.
+
+        Raises:
+            TelegramError: 네트워크 오류 또는 비정상 응답.
+        """
+        response = self._get("getMe", {}, _POST_TIMEOUT_SEC)
+        result = response.get("result")
+        if not isinstance(result, dict):
+            raise TelegramError("getMe returned unexpected payload")
         return result
 
     def send_message(
@@ -115,31 +158,47 @@ class TelegramClient:
         text: str,
         buttons: tuple[tuple[str, str], ...] = (),
     ) -> None:
-        """기존 메시지의 본문과 버튼을 바꾼다."""
+        """기존 메시지의 본문과 버튼을 바꾼다.
+
+        `reply_markup` 을 생략하면 텔레그램은 "버튼 유지"로 해석해 이전
+        버튼이 그대로 남는다. 버튼이 없는 편집에서는 빈 인라인 키보드를
+        명시해 실제로 지운다. sendMessage 는 새 메시지라 남길 버튼이 없으므로
+        여기와 달리 생략이 맞다.
+        """
         data: dict[str, object] = {
             "chat_id": chat_id,
             "message_id": message_id,
             "text": text,
         }
-        keyboard = build_keyboard(buttons)
-        if keyboard:
-            data["reply_markup"] = keyboard
+        data["reply_markup"] = build_keyboard(buttons) or _EMPTY_KEYBOARD
         self._post("editMessageText", _PostBody(data=data))
 
     def send_document(self, chat_id: str, path: Path, caption: str = "") -> None:
         """파일을 문서로 보낸다.
 
+        로컬 Bot API 서버를 쓸 때는 본문을 HTTP 로 싣지 않고 경로만 넘긴다. API
+        서버가 같은 장비에서 파일을 직접 읽으므로 큰 파일에서 복사 한 번이 사라진다.
+
         Raises:
             TelegramError: 파일을 열 수 없거나 전송이 실패했을 때.
         """
+        data: dict[str, object] = {"chat_id": chat_id, "caption": caption}
+
+        if self._api_base != _DEFAULT_API_BASE:
+            data["document"] = f"file://{path}"
+            self._post(
+                "sendDocument", _PostBody(data=data, timeout=self._upload_timeout_sec)
+            )
+            return
+
         try:
             with path.open("rb") as handle:
                 self._post(
                     "sendDocument",
                     _PostBody(
-                        data={"chat_id": chat_id, "caption": caption},
+                        data=data,
                         files={"document": (path.name, handle)},
-                        timeout=_UPLOAD_TIMEOUT_SEC,
+                        timeout=self._upload_timeout_sec,
                     ),
                 )
         except OSError as exc:

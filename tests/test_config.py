@@ -280,3 +280,185 @@ def test_bot_config_reports_all_missing_env_vars(tmp_path):
 
     with pytest.raises(ConfigError, match="PRIVATE_SYNC_ZIP_PASSWORD"):
         load_bot_config(cfg, env={"PRIVATE_SYNC_BOT_TOKEN": "tok"})
+
+
+def test_bot_config_defaults_to_the_public_api(tmp_path):
+    store = tmp_path / "store"
+    store.mkdir()
+    cfg = _write(tmp_path / "bot.yaml", f"store: {store}\n")
+
+    conf = load_bot_config(
+        cfg,
+        env={
+            "PRIVATE_SYNC_BOT_TOKEN": "tok",
+            "PRIVATE_SYNC_CHAT_ID": "123",
+            "PRIVATE_SYNC_ZIP_PASSWORD": "pw",
+        },
+    )
+
+    # 미설정이면 지금과 동일하게 동작해야 한다
+    assert conf.api_base == "https://api.telegram.org"
+    assert conf.max_part_bytes == 45 * 1024 * 1024
+
+
+def test_bot_config_reads_local_api_settings(tmp_path):
+    store = tmp_path / "store"
+    store.mkdir()
+    cfg = _write(tmp_path / "bot.yaml", f"store: {store}\n")
+
+    conf = load_bot_config(
+        cfg,
+        env={
+            "PRIVATE_SYNC_BOT_TOKEN": "tok",
+            "PRIVATE_SYNC_CHAT_ID": "123",
+            "PRIVATE_SYNC_ZIP_PASSWORD": "pw",
+            "PRIVATE_SYNC_API_BASE": "http://127.0.0.1:8081/",
+            "PRIVATE_SYNC_MAX_PART_MB": "1900",
+        },
+    )
+
+    # 끝의 슬래시는 URL 조립에서 중복되므로 떼어둔다
+    assert conf.api_base == "http://127.0.0.1:8081"
+    assert conf.max_part_bytes == 1900 * 1024 * 1024
+
+
+def test_bot_config_rejects_non_numeric_part_size(tmp_path):
+    store = tmp_path / "store"
+    store.mkdir()
+    cfg = _write(tmp_path / "bot.yaml", f"store: {store}\n")
+
+    # "②" 는 str.isdigit() 이 True 지만 int() 가 거부한다. 0 과 음수도 함께 본다.
+    for bad in ("많이", "②", "0", "-5"):
+        with pytest.raises(ConfigError, match="PRIVATE_SYNC_MAX_PART_MB"):
+            load_bot_config(
+                cfg,
+                env={
+                    "PRIVATE_SYNC_BOT_TOKEN": "tok",
+                    "PRIVATE_SYNC_CHAT_ID": "123",
+                    "PRIVATE_SYNC_ZIP_PASSWORD": "pw",
+                    "PRIVATE_SYNC_MAX_PART_MB": bad,
+                },
+            )
+
+
+def test_bot_config_rejects_part_size_above_the_public_api_limit(tmp_path):
+    store = tmp_path / "store"
+    store.mkdir()
+    cfg = _write(tmp_path / "bot.yaml", f"store: {store}\n")
+
+    # 45 를 450 으로 잘못 입력한 흔한 오타. 걸러지지 않으면 매 sendDocument 가
+    # 413 으로 실패하고 사용자는 이유를 알 수 없다.
+    with pytest.raises(ConfigError, match="PRIVATE_SYNC_MAX_PART_MB"):
+        load_bot_config(
+            cfg,
+            env={
+                "PRIVATE_SYNC_BOT_TOKEN": "tok",
+                "PRIVATE_SYNC_CHAT_ID": "123",
+                "PRIVATE_SYNC_ZIP_PASSWORD": "pw",
+                "PRIVATE_SYNC_MAX_PART_MB": "450",
+            },
+        )
+
+
+def test_bot_config_rejects_part_size_above_the_local_api_limit(tmp_path):
+    store = tmp_path / "store"
+    store.mkdir()
+    cfg = _write(tmp_path / "bot.yaml", f"store: {store}\n")
+
+    # 로컬 서버 문서상 한도는 2000MB 다.
+    with pytest.raises(ConfigError, match="PRIVATE_SYNC_MAX_PART_MB"):
+        load_bot_config(
+            cfg,
+            env={
+                "PRIVATE_SYNC_BOT_TOKEN": "tok",
+                "PRIVATE_SYNC_CHAT_ID": "123",
+                "PRIVATE_SYNC_ZIP_PASSWORD": "pw",
+                "PRIVATE_SYNC_API_BASE": "http://127.0.0.1:8081",
+                "PRIVATE_SYNC_MAX_PART_MB": "2001",
+            },
+        )
+
+
+def test_bot_config_rejects_api_base_with_a_path_component(tmp_path):
+    store = tmp_path / "store"
+    store.mkdir()
+    cfg = _write(tmp_path / "bot.yaml", f"store: {store}\n")
+
+    # PRIVATE_SYNC_API_BASE 라는 이름 때문에 봇 URL 전체
+    # (토큰 포함)를 넣는 실수가 나올 수 있다. 거부하되 값 자체는 메시지에
+    # 담지 않아야 한다 — 담으면 로그에 토큰이 남는다.
+    with pytest.raises(ConfigError) as excinfo:
+        load_bot_config(
+            cfg,
+            env={
+                "PRIVATE_SYNC_BOT_TOKEN": "tok",
+                "PRIVATE_SYNC_CHAT_ID": "123",
+                "PRIVATE_SYNC_ZIP_PASSWORD": "pw",
+                "PRIVATE_SYNC_API_BASE": "https://api.telegram.org/botSECRETTOKEN",
+            },
+        )
+
+    assert "PRIVATE_SYNC_API_BASE" in str(excinfo.value)
+    assert "SECRETTOKEN" not in str(excinfo.value)
+
+
+def test_bot_config_rejects_api_base_with_a_password(tmp_path):
+    store = tmp_path / "store"
+    store.mkdir()
+    cfg = _write(tmp_path / "bot.yaml", f"store: {store}\n")
+
+    # username 만 보고 password 를 놓치면 "https://:secret@host" 처럼 빈
+    # username 에 비밀번호만 실은 URL 이 그대로 통과해 저널에 남는다.
+    with pytest.raises(ConfigError) as excinfo:
+        load_bot_config(
+            cfg,
+            env={
+                "PRIVATE_SYNC_BOT_TOKEN": "tok",
+                "PRIVATE_SYNC_CHAT_ID": "123",
+                "PRIVATE_SYNC_ZIP_PASSWORD": "pw",
+                "PRIVATE_SYNC_API_BASE": "https://:secretpw@host",
+            },
+        )
+
+    assert "PRIVATE_SYNC_API_BASE" in str(excinfo.value)
+    assert "secretpw" not in str(excinfo.value)
+
+
+def test_bot_config_rejects_api_base_without_a_scheme(tmp_path):
+    store = tmp_path / "store"
+    store.mkdir()
+    cfg = _write(tmp_path / "bot.yaml", f"store: {store}\n")
+
+    with pytest.raises(ConfigError, match="PRIVATE_SYNC_API_BASE"):
+        load_bot_config(
+            cfg,
+            env={
+                "PRIVATE_SYNC_BOT_TOKEN": "tok",
+                "PRIVATE_SYNC_CHAT_ID": "123",
+                "PRIVATE_SYNC_ZIP_PASSWORD": "pw",
+                "PRIVATE_SYNC_API_BASE": "api.telegram.org",
+            },
+        )
+
+
+def test_bot_config_bounds_part_size_for_a_differently_cased_public_api_base(
+    tmp_path,
+):
+    store = tmp_path / "store"
+    store.mkdir()
+    cfg = _write(tmp_path / "bot.yaml", f"store: {store}\n")
+
+    # 대소문자만 다를 뿐 공개 API 다. 문자열을 그대로 비교하면 로컬 서버로
+    # 오인되어 2000MB 상한이 적용되고, 실제로는 50MB 를 넘을 때마다
+    # sendDocument 가 413 으로 실패한다.
+    with pytest.raises(ConfigError, match="PRIVATE_SYNC_MAX_PART_MB"):
+        load_bot_config(
+            cfg,
+            env={
+                "PRIVATE_SYNC_BOT_TOKEN": "tok",
+                "PRIVATE_SYNC_CHAT_ID": "123",
+                "PRIVATE_SYNC_ZIP_PASSWORD": "pw",
+                "PRIVATE_SYNC_API_BASE": "HTTPS://API.TELEGRAM.ORG",
+                "PRIVATE_SYNC_MAX_PART_MB": "1900",
+            },
+        )

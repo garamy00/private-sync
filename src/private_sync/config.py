@@ -6,6 +6,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -16,6 +17,11 @@ DEFAULT_EXCLUDES: tuple[str, ...] = (".DS_Store", "~$*", "*.swp", ".git/")
 
 # 라벨은 서버 저장소의 디렉토리명이 되므로 경로 조작 문자를 허용하지 않는다
 _FORBIDDEN_IN_LABEL = ("/", "\\", "..", "\n")
+
+_PUBLIC_API_BASE = "https://api.telegram.org"
+# 표준 Bot API 는 50MB, 로컬 API 서버는 문서상 2000MB 가 업로드 상한이다
+_PUBLIC_MAX_PART_MB = 50
+_LOCAL_MAX_PART_MB = 2000
 
 
 @dataclass(frozen=True)
@@ -51,6 +57,8 @@ class BotConfig:
     token: str
     chat_id: str
     zip_password: str
+    api_base: str
+    max_part_bytes: int
 
 
 def normalize_remote_store(raw: str) -> str:
@@ -132,6 +140,78 @@ def _build_source(raw: dict) -> Source:
     return Source(label=label, paths=tuple(paths), exclude=DEFAULT_EXCLUDES + exclude)
 
 
+def _parse_api_base(raw: str) -> str:
+    """PRIVATE_SYNC_API_BASE 를 스킴+호스트만 허용하도록 검증한다.
+
+    변수 이름이 "봇 URL 전체"로 오해되기 쉬워, 사용자가
+    `https://api.telegram.org/bot<TOKEN>` 을 통째로 넣으면 토큰이 그대로
+    실린다. 이 값은 비밀일 수 있으므로 오류 메시지에 입력값을 그대로 담지
+    않는다 — 무엇이 틀렸는지만 말한다.
+    """
+    stripped = raw.rstrip("/")
+    parsed = urlsplit(stripped)
+    has_extra = (
+        parsed.path
+        or parsed.query
+        or parsed.fragment
+        or parsed.username
+        or parsed.password
+    )
+    if parsed.scheme not in ("http", "https") or not parsed.netloc or has_extra:
+        raise ConfigError(
+            "PRIVATE_SYNC_API_BASE must be a bare scheme and host only "
+            "(no path, query, or credentials), e.g. https://api.telegram.org"
+        )
+    # 뒤에서(_parse_max_part_mb) 문자열 그대로 비교해 공개 API 여부를 가른다.
+    # 대소문자만 다른 값이 다른 값으로 취급되면 로컬 서버 상한(2000MB)이 공개
+    # API(50MB)에 새어나가므로, 비교에 쓰일 형태를 여기서 정규화해 둔다.
+    # urlsplit 은 scheme 은 이미 소문자로 돌려주지만 netloc 은 그대로 두므로
+    # hostname(소문자)과 port 를 다시 조립한다.
+    host = parsed.hostname or ""
+    netloc = f"{host}:{parsed.port}" if parsed.port is not None else host
+    return f"{parsed.scheme}://{netloc}"
+
+
+def _parse_max_part_mb(raw: str, api_base: str) -> int:
+    """PRIVATE_SYNC_MAX_PART_MB 를 정수 범위로 검증한다.
+
+    상한은 베이스 URL 에 따라 다르다(공개 API 50MB, 로컬 서버 2000MB). 그래서
+    이 함수는 `_parse_api_base` 가 돌려준 값을 받아 함께 본다.
+    """
+    # str.isdigit() 은 "②" 같은 유니코드 숫자에도 True 라 int() 가 뒤에서 터진다.
+    # 시작 경로는 ConfigError 만 잡으므로 그대로 두면 트레이스백과 함께 죽는다.
+    try:
+        part_mb = int(raw)
+    except ValueError:
+        part_mb = 0
+
+    if part_mb <= 0:
+        raise ConfigError(
+            f"PRIVATE_SYNC_MAX_PART_MB must be a positive integer, got {raw!r}"
+        )
+
+    upper_bound = (
+        _PUBLIC_MAX_PART_MB if api_base == _PUBLIC_API_BASE else _LOCAL_MAX_PART_MB
+    )
+    if part_mb > upper_bound:
+        raise ConfigError(
+            f"PRIVATE_SYNC_MAX_PART_MB must be at most {upper_bound} for "
+            f"this API base, got {raw!r}"
+        )
+    return part_mb
+
+
+def _parse_upload_settings(env: Mapping[str, str]) -> tuple[str, int]:
+    """업로드 관련 환경변수 두 개를 함께 검증한다.
+
+    파트 상한의 유효 범위가 베이스 URL 에 따라 달라지므로(공개 API 50,
+    로컬 서버 2000) 베이스를 먼저 검증한 값을 상한 검사에 그대로 넘긴다.
+    """
+    api_base = _parse_api_base(env.get("PRIVATE_SYNC_API_BASE", _PUBLIC_API_BASE))
+    part_mb = _parse_max_part_mb(env.get("PRIVATE_SYNC_MAX_PART_MB", "45"), api_base)
+    return api_base, part_mb
+
+
 def load_agent_config(path: Path) -> AgentConfig:
     """노트북 agent 설정을 읽고 검증한다.
 
@@ -169,7 +249,8 @@ def load_bot_config(path: Path, env: Mapping[str, str] | None = None) -> BotConf
     """서버 bot 설정을 읽고 비밀값은 환경변수에서 가져온다.
 
     Raises:
-        ConfigError: store 누락·부재 또는 환경변수 누락.
+        ConfigError: store 누락·부재, 환경변수 누락, API 베이스가 스킴+호스트
+            형식이 아닐 때, 또는 분할 단위가 유효 범위를 벗어날 때.
     """
     env = os.environ if env is None else env
     data = _read_yaml(path)
@@ -193,9 +274,13 @@ def load_bot_config(path: Path, env: Mapping[str, str] | None = None) -> BotConf
     if missing:
         raise ConfigError(f"missing environment variables: {', '.join(missing)}")
 
+    api_base, part_mb = _parse_upload_settings(env)
+
     return BotConfig(
         store=store,
         token=secrets["PRIVATE_SYNC_BOT_TOKEN"],
         chat_id=secrets["PRIVATE_SYNC_CHAT_ID"],
         zip_password=secrets["PRIVATE_SYNC_ZIP_PASSWORD"],
+        api_base=api_base,
+        max_part_bytes=part_mb * 1024 * 1024,
     )

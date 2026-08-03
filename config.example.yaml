@@ -19,3 +19,5 @@ sources:
 #
 # 서버에서 필요한 환경변수:
 #   PRIVATE_SYNC_BOT_TOKEN, PRIVATE_SYNC_CHAT_ID, PRIVATE_SYNC_ZIP_PASSWORD
+#   PRIVATE_SYNC_API_BASE       (선택) 로컬 Bot API 서버 주소. 미설정 시 공개 API
+#   PRIVATE_SYNC_MAX_PART_MB    (선택) 분할 단위 MB. 미설정 시 45
