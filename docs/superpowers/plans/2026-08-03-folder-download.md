@@ -495,16 +495,18 @@ def test_bot_config_rejects_non_numeric_part_size(tmp_path):
     store.mkdir()
     cfg = _write(tmp_path / "bot.yaml", f"store: {store}\n")
 
-    with pytest.raises(ConfigError, match="PRIVATE_SYNC_MAX_PART_MB"):
-        load_bot_config(
-            cfg,
-            env={
-                "PRIVATE_SYNC_BOT_TOKEN": "tok",
-                "PRIVATE_SYNC_CHAT_ID": "123",
-                "PRIVATE_SYNC_ZIP_PASSWORD": "pw",
-                "PRIVATE_SYNC_MAX_PART_MB": "많이",
-            },
-        )
+    # "②" 는 str.isdigit() 이 True 지만 int() 가 거부한다. 0 과 음수도 함께 본다.
+    for bad in ("많이", "②", "0", "-5"):
+        with pytest.raises(ConfigError, match="PRIVATE_SYNC_MAX_PART_MB"):
+            load_bot_config(
+                cfg,
+                env={
+                    "PRIVATE_SYNC_BOT_TOKEN": "tok",
+                    "PRIVATE_SYNC_CHAT_ID": "123",
+                    "PRIVATE_SYNC_ZIP_PASSWORD": "pw",
+                    "PRIVATE_SYNC_MAX_PART_MB": bad,
+                },
+            )
 ```
 
 `tests/test_telegram.py` 에 추가한다.
@@ -566,8 +568,15 @@ class BotConfig:
 ```python
     api_base = env.get("PRIVATE_SYNC_API_BASE", "https://api.telegram.org").rstrip("/")
 
+    # str.isdigit() 은 "②" 같은 유니코드 숫자에도 True 라 int() 가 뒤에서 터진다.
+    # 시작 경로는 ConfigError 만 잡으므로 그대로 두면 트레이스백과 함께 죽는다.
     raw_part_mb = env.get("PRIVATE_SYNC_MAX_PART_MB", "45")
-    if not raw_part_mb.isdigit() or int(raw_part_mb) <= 0:
+    try:
+        part_mb = int(raw_part_mb)
+    except ValueError:
+        part_mb = 0
+
+    if part_mb <= 0:
         raise ConfigError(
             f"PRIVATE_SYNC_MAX_PART_MB must be a positive integer, got {raw_part_mb!r}"
         )
@@ -578,7 +587,7 @@ class BotConfig:
         chat_id=secrets["PRIVATE_SYNC_CHAT_ID"],
         zip_password=secrets["PRIVATE_SYNC_ZIP_PASSWORD"],
         api_base=api_base,
-        max_part_bytes=int(raw_part_mb) * 1024 * 1024,
+        max_part_bytes=part_mb * 1024 * 1024,
     )
 ```
 
