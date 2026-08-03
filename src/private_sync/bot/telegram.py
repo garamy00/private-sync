@@ -71,6 +71,12 @@ def build_keyboard(buttons: tuple[tuple[str, str], ...]) -> str | None:
     return json.dumps({"inline_keyboard": rows}, ensure_ascii=False)
 
 
+# editMessageText 에서 버튼을 실제로 지우려면 빈 inline_keyboard 를 명시해야
+# 한다. build_keyboard 는 sendMessage 쪽 "생략" 의미와 겹치지 않도록 이 값을
+# 따로 반환하지 않는다.
+_EMPTY_KEYBOARD = json.dumps({"inline_keyboard": []})
+
+
 class TelegramClient:
     """Bot API 호출을 담당한다."""
 
@@ -133,15 +139,19 @@ class TelegramClient:
         text: str,
         buttons: tuple[tuple[str, str], ...] = (),
     ) -> None:
-        """기존 메시지의 본문과 버튼을 바꾼다."""
+        """기존 메시지의 본문과 버튼을 바꾼다.
+
+        `reply_markup` 을 생략하면 텔레그램은 "버튼 유지"로 해석해 이전
+        버튼이 그대로 남는다. 버튼이 없는 편집에서는 빈 인라인 키보드를
+        명시해 실제로 지운다. sendMessage 는 새 메시지라 남길 버튼이 없으므로
+        여기와 달리 생략이 맞다.
+        """
         data: dict[str, object] = {
             "chat_id": chat_id,
             "message_id": message_id,
             "text": text,
         }
-        keyboard = build_keyboard(buttons)
-        if keyboard:
-            data["reply_markup"] = keyboard
+        data["reply_markup"] = build_keyboard(buttons) or _EMPTY_KEYBOARD
         self._post("editMessageText", _PostBody(data=data))
 
     def send_document(self, chat_id: str, path: Path, caption: str = "") -> None:

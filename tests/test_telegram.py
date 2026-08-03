@@ -76,6 +76,30 @@ def test_send_message_includes_keyboard():
     assert json.loads(data["reply_markup"])["inline_keyboard"]
 
 
+def test_edit_message_text_includes_keyboard():
+    session = _FakeSession()
+    client = TelegramClient("tok", session=session)
+
+    client.edit_message_text("123", 9, "hi", buttons=(("A", "t1"),))
+
+    _, url, data, _ = session.calls[0]
+    assert url.endswith("/editMessageText")
+    assert json.loads(data["reply_markup"])["inline_keyboard"]
+
+
+def test_edit_message_text_with_no_buttons_clears_the_keyboard():
+    session = _FakeSession()
+    client = TelegramClient("tok", session=session)
+
+    client.edit_message_text("123", 9, "hi")
+
+    _, _, data, _ = session.calls[0]
+    # reply_markup 을 생략하면 텔레그램은 이전 버튼을 그대로 둔다. 빈
+    # inline_keyboard 를 명시해야 실제로 지워진다 — 그렇지 않으면 폴더 전송
+    # 진행 편집 중에도 받기/취소 버튼이 계속 눌린다.
+    assert json.loads(data["reply_markup"]) == {"inline_keyboard": []}
+
+
 def test_network_error_message_omits_token():
     session = _FakeSession(
         exc=requests.ConnectionError("https://api.telegram.org/botSECRET/x failed")

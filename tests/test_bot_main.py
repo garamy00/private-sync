@@ -457,6 +457,36 @@ def test_folder_download_refuses_when_disk_is_short(config, monkeypatch):
     assert "공간" in client.messages[-1][1]
 
 
+def test_folder_download_refuses_when_split_headroom_is_short(config, monkeypatch):
+    import private_sync.bot.main as bot_main
+
+    # 메모/a.txt(5바이트) + big.bin 으로 총 10000바이트를 만들고, max_part_bytes 를
+    # 그보다 작게 잡아 분할이 예상되는 경로를 강제한다.
+    (config.store / "메모" / "big.bin").write_bytes(os.urandom(9995))
+    small_part_config = BotConfig(
+        store=config.store,
+        token=config.token,
+        chat_id=config.chat_id,
+        zip_password=config.zip_password,
+        api_base=config.api_base,
+        max_part_bytes=100,
+    )
+    Usage = namedtuple("Usage", "total used free")
+
+    def just_enough_for_flat_headroom(_path):
+        # 총 바이트의 1.1배(11000)는 채우지만 분할 예약치인 2.2배(22000)는
+        # 못 채우는 여유. 평평한 1.1배 검사로 되돌아가면 이 값을 통과시킨다.
+        return Usage(total=100_000, used=85_000, free=15_000)
+
+    monkeypatch.setattr(bot_main.shutil, "disk_usage", just_enough_for_flat_headroom)
+    client = _SpyClient()
+
+    Deliverer(client, small_part_config).run(SendFolder(rel="메모"), _callback())
+
+    assert client.documents == []
+    assert "공간" in client.messages[-1][1]
+
+
 def test_folder_download_cleans_up_on_pack_failure(config, monkeypatch):
     import private_sync.bot.main as bot_main
 

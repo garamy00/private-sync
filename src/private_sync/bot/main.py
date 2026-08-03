@@ -55,6 +55,11 @@ _DELIVERY_FAILED_MESSAGE = (
     "/find <키워드> 로 찾아보세요."
 )
 _DISK_HEADROOM = 1.1
+# 분할이 예상되면(원본이 max_part_bytes 를 넘으면) split_file 이 원본을 지우기
+# 전에 .partNN 파일을 전부 써서, 한순간 아카이브와 파트가 디스크에 함께
+# 존재한다. 필요한 여유가 실질적으로 두 배가 되므로 _DISK_HEADROOM 을 그대로
+# 두 배로 쓴다.
+_SPLIT_DISK_HEADROOM = _DISK_HEADROOM * 2
 _NO_SPACE_MESSAGE = "서버에 압축할 공간이 부족합니다. 관리자에게 문의하세요."
 
 
@@ -183,14 +188,22 @@ class Deliverer:
         workdir = Path(tempfile.mkdtemp(prefix="private-sync-"))
         sent = 0
         try:
-            if shutil.disk_usage(workdir).free < stats.total_bytes * _DISK_HEADROOM:
+            # 원본이 max_part_bytes 를 넘으면 분할이 일어나 아카이브와 파트가
+            # 한순간 함께 디스크에 존재하므로 두 배 여유를 요구한다.
+            will_split = stats.total_bytes > self._config.max_part_bytes
+            headroom = _SPLIT_DISK_HEADROOM if will_split else _DISK_HEADROOM
+            if shutil.disk_usage(workdir).free < stats.total_bytes * headroom:
                 logger.error("Not enough disk space to pack %s", action.rel)
                 self.notify(_NO_SPACE_MESSAGE)
                 return
 
             self._progress(incoming, f"압축 중… ({format_size(stats.total_bytes)})")
             parts = pack_dir_for_send(
-                source, workdir, self._config.zip_password, self._config.max_part_bytes
+                source,
+                workdir,
+                self._config.zip_password,
+                self._config.store,
+                self._config.max_part_bytes,
             )
 
             self._progress(incoming, f"전송 중… (파트 {len(parts)}개)")
