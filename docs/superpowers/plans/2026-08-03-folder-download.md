@@ -371,13 +371,20 @@ def test_failure_notice_that_also_fails_stays_quiet(config):
         SendText(text="목록", buttons=(("A", "t"),), edit=True), _callback()
     )
 
+    # 빈 messages 만 보면 "알림을 아예 안 보낸 것" 과 구분되지 않는다.
+    # 시도했는지를 함께 본다.
     assert client.messages == []
+    assert any("표시할 수 없습니다" in text for text in client.attempts)
 ```
 
-`_SpyClient.send_message` 도 `fail_on == "all"` 에 반응하도록 조건을 넓힌다.
+`_SpyClient.__init__` 에 `self.attempts = []` 를 더하고, `send_message` 가 실패하더라도
+시도 자체는 기록하게 한다. 성공한 전송만 보면 "보내려다 실패한 것" 과 "아예 안 보낸 것" 을
+구분할 수 없다.
 
 ```python
     def send_message(self, chat_id, text, buttons=()):
+        # 실패하더라도 시도했다는 사실은 남긴다
+        self.attempts.append(text)
         if self._fail_on in ("message", "all"):
             raise TelegramError("sendMessage returned status 500")
         self.messages.append((chat_id, text, buttons))
