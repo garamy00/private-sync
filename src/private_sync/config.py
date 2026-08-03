@@ -150,13 +150,26 @@ def _parse_api_base(raw: str) -> str:
     """
     stripped = raw.rstrip("/")
     parsed = urlsplit(stripped)
-    has_extra = parsed.path or parsed.query or parsed.fragment or parsed.username
+    has_extra = (
+        parsed.path
+        or parsed.query
+        or parsed.fragment
+        or parsed.username
+        or parsed.password
+    )
     if parsed.scheme not in ("http", "https") or not parsed.netloc or has_extra:
         raise ConfigError(
             "PRIVATE_SYNC_API_BASE must be a bare scheme and host only "
             "(no path, query, or credentials), e.g. https://api.telegram.org"
         )
-    return stripped
+    # 뒤에서(_parse_max_part_mb) 문자열 그대로 비교해 공개 API 여부를 가른다.
+    # 대소문자만 다른 값이 다른 값으로 취급되면 로컬 서버 상한(2000MB)이 공개
+    # API(50MB)에 새어나가므로, 비교에 쓰일 형태를 여기서 정규화해 둔다.
+    # urlsplit 은 scheme 은 이미 소문자로 돌려주지만 netloc 은 그대로 두므로
+    # hostname(소문자)과 port 를 다시 조립한다.
+    host = parsed.hostname or ""
+    netloc = f"{host}:{parsed.port}" if parsed.port is not None else host
+    return f"{parsed.scheme}://{netloc}"
 
 
 def _parse_max_part_mb(raw: str, api_base: str) -> int:

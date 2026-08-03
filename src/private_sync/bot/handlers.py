@@ -216,14 +216,17 @@ def _confirm_folder(ctx: Context, rel: str) -> SendText:
     843MB 짜리 전송을 실수로 시작하면 되돌릴 수 없다.
     """
     stats = ctx.stats(rel)
-    # 원본 바이트 기준 상한이라 실제 파트 수의 상한일 뿐이다. 압축이 되면
-    # 보통 이보다 적게 나가므로 "최대"로 표현해 약속처럼 읽히지 않게 한다.
+    # 원본 바이트 기준 근사치다. 압축이 되면 보통 이보다 적게 나가지만, 경계
+    # 부근에서는 zip 헤더·AES 암호화 오버헤드로 이보다 많이 나갈 수도 있다.
+    # 실제 파트 수는 압축해보기 전에는 알 수 없으므로 상한("최대")이라고
+    # 단정하지 않는다 — 놀라움을 막으려는 화면이 이해 못하는 방향으로 틀리면
+    # 안 된다.
     estimated_parts = max(1, math.ceil(stats.total_bytes / ctx.max_part_bytes))
     return SendText(
         text=(
             f"📦 /{rel}\n"
             f"파일 {stats.files}개, {format_size(stats.total_bytes)}\n"
-            f"예상 파트 수 최대 {estimated_parts}개\n"
+            f"예상 파트 수 약 {estimated_parts}개\n"
             "압축해서 보낼까요?"
         ),
         buttons=(

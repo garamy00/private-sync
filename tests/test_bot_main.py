@@ -428,6 +428,28 @@ def test_malformed_update_entry_does_not_break_the_poll_loop(config):
     assert client.offsets == [None, 8]
 
 
+def test_folder_download_clears_the_keyboard_before_the_size_walk(config, monkeypatch):
+    import private_sync.bot.main as bot_main
+
+    client = _SpyClient()
+    # directory_stats 호출 시점에 이미 몇 번 편집이 있었는지 기록한다. 편집이
+    # 크기 계산보다 먼저 나가야, 그 사이 받기 버튼이 눌려도 이미 지워진 뒤라
+    # 두 번째 탭이 아무 반응 없이 씹힌다. 순서가 뒤바뀌면(편집이 계산 뒤로
+    # 밀리면) 이 값이 0으로 나온다.
+    edit_count_at_walk = []
+    original_directory_stats = bot_main.store.directory_stats
+
+    def spying_directory_stats(root, rel):
+        edit_count_at_walk.append(len(client.edits))
+        return original_directory_stats(root, rel)
+
+    monkeypatch.setattr(bot_main.store, "directory_stats", spying_directory_stats)
+
+    Deliverer(client, config).run(SendFolder(rel="메모"), _callback())
+
+    assert edit_count_at_walk == [1]
+
+
 def test_folder_download_reports_progress_and_sends(config):
     (config.store / "메모" / "하위").mkdir(parents=True, exist_ok=True)
     (config.store / "메모" / "하위" / "b.txt").write_bytes(b"bb")
@@ -506,6 +528,21 @@ def test_folder_download_refuses_when_disk_is_short(config, monkeypatch):
 
     assert client.documents == []
     assert "공간" in client.messages[-1][1]
+    # notify 로 안내는 나갔지만, 항목 6이 추가한 첫 편집("폴더 확인 중…")이 그대로
+    # 남으면 화면은 여전히 확인 중인 것처럼 보이고 받기 버튼도 없는 채로 멈춘다
+    progress = [text for _chat, _message_id, text, _buttons in client.edits]
+    assert progress[-1] == "공간 부족"
+
+
+def test_folder_download_corrects_the_progress_message_when_folder_is_missing(config):
+    client = _SpyClient()
+
+    Deliverer(client, config).run(SendFolder(rel="없는폴더"), _callback())
+
+    assert client.documents == []
+    assert "동기화 대기 중" in client.messages[-1][1]
+    progress = [text for _chat, _message_id, text, _buttons in client.edits]
+    assert progress[-1] == "폴더 없음"
 
 
 def test_folder_download_refuses_when_split_headroom_is_short(config, monkeypatch):

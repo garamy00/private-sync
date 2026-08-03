@@ -402,6 +402,28 @@ def test_bot_config_rejects_api_base_with_a_path_component(tmp_path):
     assert "SECRETTOKEN" not in str(excinfo.value)
 
 
+def test_bot_config_rejects_api_base_with_a_password(tmp_path):
+    store = tmp_path / "store"
+    store.mkdir()
+    cfg = _write(tmp_path / "bot.yaml", f"store: {store}\n")
+
+    # username 만 보고 password 를 놓치면 "https://:secret@host" 처럼 빈
+    # username 에 비밀번호만 실은 URL 이 그대로 통과해 저널에 남는다.
+    with pytest.raises(ConfigError) as excinfo:
+        load_bot_config(
+            cfg,
+            env={
+                "PRIVATE_SYNC_BOT_TOKEN": "tok",
+                "PRIVATE_SYNC_CHAT_ID": "123",
+                "PRIVATE_SYNC_ZIP_PASSWORD": "pw",
+                "PRIVATE_SYNC_API_BASE": "https://:secretpw@host",
+            },
+        )
+
+    assert "PRIVATE_SYNC_API_BASE" in str(excinfo.value)
+    assert "secretpw" not in str(excinfo.value)
+
+
 def test_bot_config_rejects_api_base_without_a_scheme(tmp_path):
     store = tmp_path / "store"
     store.mkdir()
@@ -415,5 +437,28 @@ def test_bot_config_rejects_api_base_without_a_scheme(tmp_path):
                 "PRIVATE_SYNC_CHAT_ID": "123",
                 "PRIVATE_SYNC_ZIP_PASSWORD": "pw",
                 "PRIVATE_SYNC_API_BASE": "api.telegram.org",
+            },
+        )
+
+
+def test_bot_config_bounds_part_size_for_a_differently_cased_public_api_base(
+    tmp_path,
+):
+    store = tmp_path / "store"
+    store.mkdir()
+    cfg = _write(tmp_path / "bot.yaml", f"store: {store}\n")
+
+    # 대소문자만 다를 뿐 공개 API 다. 문자열을 그대로 비교하면 로컬 서버로
+    # 오인되어 2000MB 상한이 적용되고, 실제로는 50MB 를 넘을 때마다
+    # sendDocument 가 413 으로 실패한다.
+    with pytest.raises(ConfigError, match="PRIVATE_SYNC_MAX_PART_MB"):
+        load_bot_config(
+            cfg,
+            env={
+                "PRIVATE_SYNC_BOT_TOKEN": "tok",
+                "PRIVATE_SYNC_CHAT_ID": "123",
+                "PRIVATE_SYNC_ZIP_PASSWORD": "pw",
+                "PRIVATE_SYNC_API_BASE": "HTTPS://API.TELEGRAM.ORG",
+                "PRIVATE_SYNC_MAX_PART_MB": "1900",
             },
         )

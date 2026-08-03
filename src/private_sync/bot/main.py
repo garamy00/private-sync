@@ -64,6 +64,8 @@ _NO_SPACE_MESSAGE = "서버에 압축할 공간이 부족합니다. 관리자에
 _CHECKING_FOLDER_MESSAGE = "폴더 확인 중…"
 _PACK_FAILED_PROGRESS = "압축 실패"
 _SEND_FAILED_PROGRESS = "전송 실패"
+_FOLDER_MISSING_PROGRESS = "폴더 없음"
+_NO_SPACE_PROGRESS = "공간 부족"
 
 
 class Deliverer:
@@ -189,6 +191,9 @@ class Deliverer:
             stats = store.directory_stats(self._config.store, action.rel)
         except StoreError as exc:
             logger.warning("Rejected folder request %r: %s", action.rel, exc)
+            # 항목 6이 추가한 첫 편집이 "폴더 확인 중…" 으로 남아 있으면, 실제로는
+            # 실패했는데도 화면은 계속 확인 중인 것처럼 보인다.
+            self._progress(incoming, _FOLDER_MISSING_PROGRESS)
             self.notify(_MISSING_FILE_MESSAGE)
             return
 
@@ -201,6 +206,7 @@ class Deliverer:
             headroom = _SPLIT_DISK_HEADROOM if will_split else _DISK_HEADROOM
             if shutil.disk_usage(workdir).free < stats.total_bytes * headroom:
                 logger.error("Not enough disk space to pack %s", action.rel)
+                self._progress(incoming, _NO_SPACE_PROGRESS)
                 self.notify(_NO_SPACE_MESSAGE)
                 return
 
