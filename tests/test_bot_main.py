@@ -512,6 +512,27 @@ def test_folder_download_corrects_the_progress_message_on_send_failure(config):
     assert progress[-1] == "전송 실패"
 
 
+def test_send_failure_log_keeps_the_error_detail(config, caplog):
+    # 예외 타입만 남기면 로그가 전부 "TelegramError" 라 원인을 가릴 수 없다.
+    # 실제로 로컬 API 서버가 500초에 연결을 끊는 사고를 이 로그로 진단하지
+    # 못했다. TelegramError 메시지는 설계상 토큰을 담지 않으므로 남겨도 된다.
+    (config.store / "메모" / "big.bin").write_bytes(os.urandom(9995))
+    small_part_config = BotConfig(
+        store=config.store,
+        token=config.token,
+        chat_id=config.chat_id,
+        zip_password=config.zip_password,
+        api_base=config.api_base,
+        max_part_bytes=2000,
+    )
+    client = _SpyClient(fail_on="document_after_1")
+
+    with caplog.at_level(logging.ERROR):
+        Deliverer(client, small_part_config).run(SendFolder(rel="메모"), _callback())
+
+    assert "sendDocument returned status 500" in caplog.text
+
+
 def test_folder_download_refuses_when_disk_is_short(config, monkeypatch):
     import private_sync.bot.main as bot_main
 

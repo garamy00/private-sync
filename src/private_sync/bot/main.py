@@ -152,11 +152,14 @@ class Deliverer:
             logger.error("Packing failed for %s: %s", action.rel, exc)
             self.notify("파일을 포장하는 중 오류가 발생했습니다.")
         except (TelegramError, OSError) as exc:
+            # TelegramError 메시지는 메서드명·상태코드·예외 타입만으로 만들어져
+            # 토큰이 담긴 URL 이 들어가지 않는다(telegram.py 의 `from None`).
+            # 타입 이름만 남기면 원인을 가려 진단이 불가능하다.
             logger.error(
                 "Sending failed for %s after %d part(s): %s",
                 action.rel,
                 sent,
-                type(exc).__name__,
+                exc,
             )
             # 이미 보낸 파트가 있으면 재시도 시 같은 이름의 파트가 섞인다.
             # 사용자가 앞의 것을 버리도록 명시해야 결합 명령이 어긋나지 않는다.
@@ -238,11 +241,14 @@ class Deliverer:
             self._progress(incoming, _PACK_FAILED_PROGRESS)
             self.notify("폴더를 포장하는 중 오류가 발생했습니다.")
         except (TelegramError, OSError) as exc:
+            # TelegramError 메시지는 메서드명·상태코드·예외 타입만으로 만들어져
+            # 토큰이 담긴 URL 이 들어가지 않는다(telegram.py 의 `from None`).
+            # 타입 이름만 남기면 원인을 가려 진단이 불가능하다.
             logger.error(
                 "Sending failed for folder %s after %d part(s): %s",
                 action.rel,
                 sent,
-                type(exc).__name__,
+                exc,
             )
             self._progress(incoming, _SEND_FAILED_PROGRESS)
             if sent:
