@@ -18,6 +18,9 @@ logger = logging.getLogger(__name__)
 
 _USAGE = "사용법: /start 로 목록 보기, /find <키워드> 로 파일명 검색"
 _TOKEN_BYTES = 6
+# 한 화면에 담을 항목 수. 텔레그램은 버튼이 너무 많은 reply_markup 을 400 으로
+# 거부하며, 그 실패는 사용자에게 "눌러도 반응 없음" 으로 보인다.
+_PAGE_SIZE = 20
 
 
 class TokenMap:
@@ -32,18 +35,18 @@ class TokenMap:
 
     def __init__(self, limit: int = 500) -> None:
         self._limit = limit
-        self._entries: OrderedDict[str, tuple[str, str]] = OrderedDict()
+        self._entries: OrderedDict[str, tuple[str, str, int]] = OrderedDict()
 
-    def put(self, kind: str, rel: str) -> str:
-        """(kind, rel)에 대한 토큰을 발급한다."""
+    def put(self, kind: str, rel: str, page: int = 0) -> str:
+        """(kind, rel, page)에 대한 토큰을 발급한다."""
         token = secrets.token_urlsafe(_TOKEN_BYTES)
-        self._entries[token] = (kind, rel)
+        self._entries[token] = (kind, rel, page)
         while len(self._entries) > self._limit:
             self._entries.popitem(last=False)
         return token
 
-    def get(self, token: str) -> tuple[str, str] | None:
-        """토큰에 해당하는 (kind, rel)을 반환한다. 없으면 None."""
+    def get(self, token: str) -> tuple[str, str, int] | None:
+        """토큰에 해당하는 (kind, rel, page)를 반환한다. 없으면 None."""
         return self._entries.get(token)
 
 
@@ -86,6 +89,15 @@ class Context:
     tokens: TokenMap
     lister: Callable[[str], list[Entry]]
     searcher: Callable[[str], list[Entry]]
+
+
+@dataclass(frozen=True)
+class BrowseView:
+    """탐색 화면 한 장을 가리키는 좌표."""
+
+    rel: str
+    page: int = 0
+    edit: bool = False
 
 
 def extract(update: dict) -> Incoming | None:
@@ -136,20 +148,53 @@ def _entry_button(entry: Entry, tokens: TokenMap) -> tuple[str, str]:
     return (label, tokens.put("file", entry.rel))
 
 
-def _browse(rel: str, ctx: Context, edit: bool) -> SendText:
-    """디렉토리 내용을 버튼 목록으로 만든다."""
-    entries = ctx.lister(rel)
+@dataclass(frozen=True)
+class PageState:
+    """현재 페이지와 전체 페이지 수."""
+
+    page: int
+    total: int
+
+
+def _pager_buttons(ctx: Context, rel: str, state: PageState) -> list[tuple[str, str]]:
+    """페이지 이동 버튼을 만든다. 한 페이지뿐이면 아무것도 만들지 않는다."""
+    if state.total <= 1:
+        return []
+
     buttons: list[tuple[str, str]] = []
+    if state.page > 0:
+        buttons.append(("◀ 이전", ctx.tokens.put("dir", rel, state.page - 1)))
+    buttons.append(
+        (f"{state.page + 1}/{state.total}", ctx.tokens.put("dir", rel, state.page))
+    )
+    if state.page < state.total - 1:
+        buttons.append(("다음 ▶", ctx.tokens.put("dir", rel, state.page + 1)))
+    return buttons
 
-    parent = parent_rel(rel)
+
+def _browse(ctx: Context, view: BrowseView) -> SendText:
+    """디렉토리 내용을 한 페이지 분량의 버튼 목록으로 만든다."""
+    entries = ctx.lister(view.rel)
+    total_pages = max(1, (len(entries) + _PAGE_SIZE - 1) // _PAGE_SIZE)
+    page = max(0, min(view.page, total_pages - 1))
+    start = page * _PAGE_SIZE
+
+    buttons: list[tuple[str, str]] = []
+    parent = parent_rel(view.rel)
     if parent is not None:
+        # 몇 페이지에 있든 되돌아갈 수 있어야 한다
         buttons.append(("⬆️ 상위", ctx.tokens.put("dir", parent)))
-    buttons += [_entry_button(entry, ctx.tokens) for entry in entries]
 
-    title = f"📂 /{rel}" if rel else "📂 저장소"
+    buttons += [
+        _entry_button(entry, ctx.tokens)
+        for entry in entries[start : start + _PAGE_SIZE]
+    ]
+    buttons += _pager_buttons(ctx, view.rel, PageState(page, total_pages))
+
+    title = f"📂 /{view.rel}" if view.rel else "📂 저장소"
     if not entries:
         title = f"{title}\n(비어 있습니다)"
-    return SendText(text=title, buttons=tuple(buttons), edit=edit)
+    return SendText(text=title, buttons=tuple(buttons), edit=view.edit)
 
 
 def _find(keyword: str, ctx: Context) -> SendText:
@@ -176,7 +221,7 @@ def _handle_message(incoming: Incoming, ctx: Context) -> Action:
     argument = parts[1].strip() if len(parts) > 1 else ""
 
     if command in ("/start", "/ls"):
-        return _browse("", ctx, edit=False)
+        return _browse(ctx, BrowseView(rel=""))
     if command == "/find":
         return _find(argument, ctx)
     return SendText(text=_USAGE)
@@ -189,9 +234,9 @@ def _handle_callback(incoming: Incoming, ctx: Context) -> Action:
         # 봇 재시작이나 오래된 토큰 축출로 토큰이 사라진 경우다
         return SendText(text="목록이 만료되었습니다. /start 로 다시 시작해 주세요.")
 
-    kind, rel = resolved
+    kind, rel, page = resolved
     if kind == "dir":
-        return _browse(rel, ctx, edit=True)
+        return _browse(ctx, BrowseView(rel=rel, page=page, edit=True))
     return SendFile(rel=rel, caption=rel.rsplit("/", 1)[-1])
 
 
