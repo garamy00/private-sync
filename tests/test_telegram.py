@@ -154,3 +154,39 @@ def test_get_me_returns_the_result_payload():
     client = TelegramClient("tok", session=session)
 
     assert client.get_me() == {"username": "mybot"}
+
+
+def test_public_api_uploads_the_file_body(tmp_path):
+    document = tmp_path / "a.zip"
+    document.write_bytes(b"zip")
+    session = _FakeSession()
+    client = TelegramClient("tok", session=session)
+
+    client.send_document("123", document, caption="a")
+
+    _, _, data = session.calls[0]
+    assert "document" not in data
+
+
+def test_local_api_sends_the_path_instead_of_the_body(tmp_path):
+    document = tmp_path / "a.zip"
+    document.write_bytes(b"zip")
+    session = _FakeSession()
+    client = TelegramClient("tok", session=session, api_base="http://127.0.0.1:8081")
+
+    client.send_document("123", document, caption="a")
+
+    _, _, data = session.calls[0]
+    # 같은 장비이므로 본문을 HTTP 로 밀어 넣을 이유가 없다
+    assert data["document"] == f"file://{document}"
+
+
+def test_local_api_upload_does_not_open_the_file(tmp_path):
+    missing = tmp_path / "없는파일.zip"
+    session = _FakeSession()
+    client = TelegramClient("tok", session=session, api_base="http://127.0.0.1:8081")
+
+    # 파일을 읽지 않으므로 존재하지 않아도 요청은 나간다. 판단은 서버가 한다.
+    client.send_document("123", missing, caption="a")
+
+    assert session.calls

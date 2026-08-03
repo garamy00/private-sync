@@ -147,15 +147,27 @@ class TelegramClient:
     def send_document(self, chat_id: str, path: Path, caption: str = "") -> None:
         """파일을 문서로 보낸다.
 
+        로컬 Bot API 서버를 쓸 때는 본문을 HTTP 로 싣지 않고 경로만 넘긴다. API
+        서버가 같은 장비에서 파일을 직접 읽으므로 큰 파일에서 복사 한 번이 사라진다.
+
         Raises:
             TelegramError: 파일을 열 수 없거나 전송이 실패했을 때.
         """
+        data: dict[str, object] = {"chat_id": chat_id, "caption": caption}
+
+        if self._api_base != _DEFAULT_API_BASE:
+            data["document"] = f"file://{path}"
+            self._post(
+                "sendDocument", _PostBody(data=data, timeout=_UPLOAD_TIMEOUT_SEC)
+            )
+            return
+
         try:
             with path.open("rb") as handle:
                 self._post(
                     "sendDocument",
                     _PostBody(
-                        data={"chat_id": chat_id, "caption": caption},
+                        data=data,
                         files={"document": (path.name, handle)},
                         timeout=_UPLOAD_TIMEOUT_SEC,
                     ),

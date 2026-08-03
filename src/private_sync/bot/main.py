@@ -118,7 +118,9 @@ class Deliverer:
         workdir = Path(tempfile.mkdtemp(prefix="private-sync-"))
         sent = 0
         try:
-            parts = pack_for_send(source, workdir, self._config.zip_password)
+            parts = pack_for_send(
+                source, workdir, self._config.zip_password, self._config.max_part_bytes
+            )
             for part in parts:
                 self._client.send_document(
                     self._config.chat_id, part, caption=part.name
